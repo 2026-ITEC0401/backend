@@ -1,0 +1,11 @@
+# Backend publishes device commands only.
+user hearo-api
+topic write hearo/+/devices/+/command
+
+# Collector reads device state and alerts but cannot publish device commands.
+user hearo-bridge
+topic read hearo/+/alerts
+topic read hearo/+/devices/+/ack
+topic read hearo/+/devices/+/state
+topic read hearo/+/devices/+/presence
+topic read hearo/log

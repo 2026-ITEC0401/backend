@@ -1,4 +1,28 @@
 __pycache__/
-*.pyc
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+
+.venv/
+venv/
+
 *.db
 .env
+.env.*
+!.env.example
+!*.env.example
+
+.DS_Store
+*.log
+
+# 운영 인증정보와 인증서 개인키
+config.h
+*.pem
+*.key
+*.p12
+*.pfx
+
+# 로컬 smoke test 응답에는 토큰·credential이 포함될 수 있음
+*signup-response*.json
+*device-credentials*.json

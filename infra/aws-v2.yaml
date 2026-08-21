@@ -1,0 +1,111 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Hearo final v2 DynamoDB tables and least-privilege EC2 application role
+
+Parameters:
+  CoreTableName:
+    Type: String
+    Default: hearo-core-v2-final
+  AlertsTableName:
+    Type: String
+    Default: hearo-alerts-v2-final
+Resources:
+  CoreTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Ref CoreTableName
+      BillingMode: PAY_PER_REQUEST
+      SSESpecification:
+        SSEEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      TimeToLiveSpecification:
+        AttributeName: expires_at_epoch
+        Enabled: true
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+        - AttributeName: sk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+        - AttributeName: sk
+          KeyType: RANGE
+
+  AlertsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Ref AlertsTableName
+      BillingMode: PAY_PER_REQUEST
+      SSESpecification:
+        SSEEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      AttributeDefinitions:
+        - AttributeName: household_id
+          AttributeType: S
+        - AttributeName: event_key
+          AttributeType: S
+        - AttributeName: alarm_lookup_key
+          AttributeType: S
+      KeySchema:
+        - AttributeName: household_id
+          KeyType: HASH
+        - AttributeName: event_key
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: alarm-lookup-index
+          KeySchema:
+            - AttributeName: alarm_lookup_key
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+
+  HearoEc2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: HearoTables
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:BatchGetItem
+                  - dynamodb:ConditionCheckItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:Query
+                  - dynamodb:TransactWriteItems
+                  - dynamodb:UpdateItem
+                Resource:
+                  - !GetAtt CoreTable.Arn
+                  - !GetAtt AlertsTable.Arn
+                  - !Sub "${AlertsTable.Arn}/index/*"
+  HearoInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref HearoEc2Role
+
+Outputs:
+  CoreTable:
+    Value: !Ref CoreTable
+  AlertsTable:
+    Value: !Ref AlertsTable
+  InstanceProfile:
+    Value: !Ref HearoInstanceProfile

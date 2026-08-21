@@ -1,0 +1,28 @@
+# Backend publishes device commands only.
+user hearo-api
+topic write hearo/+/devices/+/command
+
+# Collector reads device state and alerts but cannot publish device commands.
+user hearo-bridge
+topic read hearo/+/alerts
+topic read hearo/+/devices/+/ack
+topic read hearo/+/devices/+/state
+topic read hearo/+/devices/+/presence
+topic read hearo/log
+
+# Generated device block example — do not grant access to any other household.
+user home-xxxxxxxxxxxx__rpi-001
+topic read hearo/home-xxxxxxxxxxxx/devices/rpi-001/command
+topic write hearo/home-xxxxxxxxxxxx/devices/rpi-001/ack
+topic write hearo/home-xxxxxxxxxxxx/devices/rpi-001/state
+topic write hearo/home-xxxxxxxxxxxx/devices/rpi-001/presence
+topic write hearo/home-xxxxxxxxxxxx/alerts
+topic write hearo/alert
+topic write hearo/log
+
+user home-xxxxxxxxxxxx__esp32_1
+topic read hearo/home-xxxxxxxxxxxx/alerts
+topic read hearo/home-xxxxxxxxxxxx/devices/esp32_1/command
+topic write hearo/home-xxxxxxxxxxxx/devices/esp32_1/ack
+topic write hearo/home-xxxxxxxxxxxx/devices/esp32_1/state
+topic write hearo/home-xxxxxxxxxxxx/devices/esp32_1/presence
