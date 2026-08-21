@@ -1,4 +1,1 @@
-fastapi==0.115.0
-uvicorn==0.30.0
-sqlalchemy==2.0.35
-websockets==13.0
+-r requirements-backend-v2.txt
