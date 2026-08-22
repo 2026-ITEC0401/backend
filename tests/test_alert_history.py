@@ -1,7 +1,7 @@
 from datetime import UTC, datetime, timedelta
 
 from hearo_backend.domain import Alert, iso_utc
-from hearo_backend.history import group_thirty_day_history, thirty_day_utc_range
+from hearo_backend.history import group_history, history_utc_range
 
 from .conftest import auth_header, create_family, create_owner
 
@@ -20,10 +20,10 @@ def alert(household_id: str, event_id: str, timestamp: datetime) -> Alert:
     )
 
 
-def test_history_has_thirty_days_empty_days_and_exact_range(api):
+def test_history_has_seven_days_empty_days_and_exact_range(api):
     owner = create_owner(api)
     household_id = owner["user"]["household_id"]
-    _, _, start, end_exclusive = thirty_day_utc_range()
+    _, _, start, end_exclusive = history_utc_range()
     included = [
         alert(household_id, "at-start", start),
         alert(household_id, "same-time-a", end_exclusive - timedelta(seconds=1)),
@@ -45,7 +45,7 @@ def test_history_has_thirty_days_empty_days_and_exact_range(api):
     assert response.status_code == 200
     payload = response.json()
     assert payload["timezone"] == "Asia/Seoul"
-    assert len(payload["days"]) == 30
+    assert len(payload["days"]) == 7
     assert payload["days"] == sorted(payload["days"], key=lambda day: day["date"], reverse=True)
     assert payload["total_count"] == 3
     ids = [alarm["id"] for day in payload["days"] for alarm in day["alarms"]]
@@ -60,7 +60,7 @@ def test_kst_utc_1500_boundary_groups_into_correct_dates():
     household = "home-boundary"
     before = alert(household, "before", datetime(2026, 8, 12, 14, 59, 59, tzinfo=UTC))
     after = alert(household, "after", datetime(2026, 8, 12, 15, 0, 0, tzinfo=UTC))
-    result = group_thirty_day_history(
+    result = group_history(
         [before, after], now=datetime(2026, 8, 13, 3, 0, tzinfo=UTC)
     )
     grouped = {
@@ -110,7 +110,10 @@ def test_internal_mqtt_alert_is_idempotent_and_appears_in_latest(api):
         f"/households/{household_id}/alarms/history", headers=auth_header(owner)
     )
     assert history.json()["total_count"] == 1
-    assert len([event for _, event in broadcasts if event["type"] == "alarm.created"]) == 1
+    alarm_events = [event for _, event in broadcasts if event["type"] == "alarm.created"]
+    assert len(alarm_events) == 1
+    assert alarm_events[0]["alarm"]["raw_label"] == "도어락_개방음"
+    assert alarm_events[0]["alarm"]["type"] == "Visitor"
 
 
 def test_alarm_detail_is_household_scoped_and_returns_kst_fields(api):
@@ -128,12 +131,15 @@ def test_alarm_detail_is_household_scoped_and_returns_kst_fields(api):
     assert alarm_value["id"] == "detail-alert-001"
     assert alarm_value["date"] == "2026-08-21"
     assert alarm_value["local_time"] == "2026-08-21T08:47:00+09:00"
+    assert alarm_value["raw_label"] == "도어락_개방음"
+    assert alarm_value["type"] == "Visitor"
     assert set(alarm_value) == {
         "id",
         "date",
         "local_time",
         "location",
         "sound",
+        "raw_label",
         "type",
     }
 
@@ -171,6 +177,23 @@ def test_alarm_detail_is_household_scoped_and_returns_kst_fields(api):
     assert blocked.status_code == 403
 
 
+def test_alarm_detail_keeps_raw_label_key_when_legacy_value_is_missing(api):
+    owner = create_owner(api)
+    household_id = owner["user"]["household_id"]
+    legacy_alert = alert(household_id, "legacy-alert-001", datetime.now(UTC))
+    legacy_alert.raw_label = None
+    api.repository.put_alert(legacy_alert)
+
+    response = api.client.get(
+        f"/households/{household_id}/alarms/legacy-alert-001",
+        headers=auth_header(owner),
+    )
+
+    assert response.status_code == 200
+    assert "raw_label" in response.json()["alarm"]
+    assert response.json()["alarm"]["raw_label"] is None
+
+
 def test_hub_publisher_can_store_remote_capture_location_and_hybrid_diagnostics(api):
     owner = create_owner(api)
     household_id = owner["user"]["household_id"]
@@ -201,8 +224,17 @@ def test_hub_publisher_can_store_remote_capture_location_and_hybrid_diagnostics(
     )
     assert response.status_code == 200, response.text
     alarm_value = response.json()["alarm"]
-    assert set(alarm_value) == {"id", "sound", "location", "time"}
+    assert set(alarm_value) == {
+        "id",
+        "sound",
+        "raw_label",
+        "type",
+        "location",
+        "time",
+    }
     assert alarm_value["location"] == "현관"
+    assert alarm_value["raw_label"] == "yamnet_critical_siren"
+    assert alarm_value["type"] == "Urgent"
     stored = api.repository.get_alert(household_id, "remote-alert-001")
     assert stored.publisher_device_id == "rpi-001"
     assert stored.source_device_id == "esp32_2"
@@ -210,7 +242,7 @@ def test_hub_publisher_can_store_remote_capture_location_and_hybrid_diagnostics(
     assert stored.yamnet_family == "critical_siren"
 
 
-def test_empty_history_still_returns_all_thirty_dates(api):
+def test_empty_history_still_returns_all_seven_dates(api):
     owner = create_owner(api)
     household_id = owner["user"]["household_id"]
     response = api.client.get(
@@ -219,5 +251,25 @@ def test_empty_history_still_returns_all_thirty_dates(api):
     assert response.status_code == 200
     payload = response.json()
     assert payload["total_count"] == 0
-    assert len(payload["days"]) == 30
+    assert len(payload["days"]) == 7
     assert all(day["alarms"] == [] for day in payload["days"])
+
+
+def test_alert_older_than_history_window_is_hidden_but_detail_remains_available(api):
+    owner = create_owner(api)
+    household_id = owner["user"]["household_id"]
+    _, _, start, _ = history_utc_range()
+    old_alert = alert(household_id, "older-detail", start - timedelta(seconds=1))
+    api.repository.put_alert(old_alert)
+
+    history = api.client.get(
+        f"/households/{household_id}/alarms/history", headers=auth_header(owner)
+    )
+    assert history.status_code == 200
+    assert history.json()["total_count"] == 0
+
+    detail = api.client.get(
+        f"/households/{household_id}/alarms/older-detail", headers=auth_header(owner)
+    )
+    assert detail.status_code == 200
+    assert detail.json()["alarm"]["id"] == "older-detail"

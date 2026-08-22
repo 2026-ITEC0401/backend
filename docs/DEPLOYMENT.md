@@ -1,6 +1,6 @@
 # Hearo 백엔드 v2 배포 및 롤백
 
-이 문서는 현재 검증한 EC2 병렬 배포 구조를 기준으로 합니다.
+이 문서는 현재 검증한 EC2 병렬 배포 구조에 v2.1 변경을 반영하는 절차를 기준으로 합니다.
 
 ```text
 Nginx HTTPS /v2/
@@ -43,7 +43,7 @@ python3 -m venv .venv
 ```
 
 ```text
-Hearo API 2.0.0
+Hearo API 2.1.0
 ```
 
 ## 3. DynamoDB
@@ -67,6 +67,13 @@ sudo install -o root -g root -m 600 infra/hearo-mqtt-bridge.env.example /etc/hea
 ```
 
 두 파일의 `HEARO_INTERNAL_TOKEN`은 같아야 합니다. JWT secret, internal token, API MQTT 비밀번호, 브리지 MQTT 비밀번호는 각각 별도로 생성합니다.
+
+API 환경 파일에는 행안부 **검색 API** 승인키와 제한 시간을 추가합니다. 승인키는 Git이나 프론트 환경변수에 저장하지 않습니다.
+
+```dotenv
+HEARO_JUSO_CONFIRM_KEY=행안부_검색_API_승인키
+HEARO_JUSO_TIMEOUT_SECONDS=5
+```
 
 ## 5. systemd
 
@@ -99,11 +106,13 @@ sudo systemctl enable --now hearo-mqtt-bridge-v2-final
 
 1. `/v2/health`와 `/v2/docs`가 `200`을 반환합니다.
 2. 신규 owner 회원가입이 `201`을 반환합니다.
-3. `/me`, `/households/current`, 긴급 주소와 기기 목록이 `200`을 반환합니다.
+3. `/me`, `/households/current`, 주소 온보딩과 기기 목록이 정상 응답을 반환합니다.
 4. 고정 기기 `rpi-001`, `esp32_1`, `esp32_2`, `esp32_3`가 생성됩니다.
-5. 최근 30일 이력은 데이터가 없어도 30개 날짜를 반환합니다.
-6. MQTT 브리지가 `MQTT bridge subscribed to household-scoped topics`를 기록합니다.
-7. 실제 알림을 발행한 뒤 최신·이력·상세조회 응답이 일치합니다.
+5. 행안부 도로명·상세주소 검색과 owner 주소 등록, member 수정 `403`을 확인합니다.
+6. 최근 7일 이력은 데이터가 없어도 7개 날짜를 반환합니다.
+7. MQTT 브리지가 `MQTT bridge subscribed to household-scoped topics`를 기록합니다.
+8. 실제 알림을 발행한 뒤 최신·이력·상세조회 응답이 일치하고 상세 응답에 `raw_label`이 있습니다.
+9. WebSocket `alarm.created`의 `alarm` 객체에 `type`과 `raw_label`이 있습니다.
 
 회원가입 응답의 device credential은 한 번만 원문으로 반환되므로 안전하게 장비별로 전달합니다.
 

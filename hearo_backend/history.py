@@ -8,10 +8,10 @@ from .domain import Alert, parse_timestamp
 
 
 SEOUL = ZoneInfo("Asia/Seoul")
-HISTORY_DAYS = 30
+HISTORY_DAYS = 7
 
 
-def thirty_day_utc_range(now: datetime | None = None) -> tuple[date, date, datetime, datetime]:
+def history_utc_range(now: datetime | None = None) -> tuple[date, date, datetime, datetime]:
     current = now or datetime.now(UTC)
     local_today = current.astimezone(SEOUL).date()
     start_date = local_today - timedelta(days=HISTORY_DAYS - 1)
@@ -21,8 +21,8 @@ def thirty_day_utc_range(now: datetime | None = None) -> tuple[date, date, datet
     return start_date, end_date, start_local.astimezone(UTC), end_exclusive_local.astimezone(UTC)
 
 
-def group_thirty_day_history(alerts: Iterable[Alert], now: datetime | None = None) -> dict:
-    start_date, end_date, _, _ = thirty_day_utc_range(now)
+def group_history(alerts: Iterable[Alert], now: datetime | None = None) -> dict:
+    start_date, end_date, _, _ = history_utc_range(now)
     day_map: dict[str, list[dict]] = {
         (end_date - timedelta(days=offset)).isoformat(): []
         for offset in range(HISTORY_DAYS)

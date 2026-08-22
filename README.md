@@ -1,8 +1,8 @@
 # Hearo 백엔드 v2
 
-구현 기준일은 2026-08-21입니다. 이 소스는 샘플 단계의 이메일·일회용 초대 코드·7일 이력 계약을 제거하고, 프론트팀과 합의한 최종 계약을 구현합니다. AWS EC2의 FastAPI, DynamoDB, MQTT TLS 브리지를 이용한 운영 smoke test를 완료했습니다.
+구현 기준일은 2026-08-22입니다. 이 소스는 기존에 배포한 v2에 최근 7일 알림, 주소 온보딩, 행안부 주소 검색과 알림 세부 필드를 반영한 v2.1 배포 후보입니다. EC2 반영 전에는 아래 테스트와 배포 문서의 smoke test를 다시 수행해야 합니다.
 
-- API 계약: [`docs/API_SPEC_V2_DRAFT.md`](./docs/API_SPEC_V2_DRAFT.md)
+- API 계약과 프론트 필드 활용 사전: [`docs/API_SPEC_V2_DRAFT.md`](./docs/API_SPEC_V2_DRAFT.md) 10절
 - 기존 샘플과의 차이: [`docs/API_SPEC_V2_SAMPLE_GAP.md`](./docs/API_SPEC_V2_SAMPLE_GAP.md)
 - 배포와 롤백: [`docs/DEPLOYMENT.md`](./docs/DEPLOYMENT.md)
 
@@ -14,10 +14,11 @@
 - 24시간 유효한 6자리 공유 초대 코드, 가구 미리보기와 추후 연동
 - 사용자별 가족 표시 이름과 본인 계정의 가구 연동 해제
 - owner 연동 해제 시 가구 비활성화 및 긴급 주소 삭제
-- 신규 가구의 도로명주소·우편번호·상세주소 저장과 권한 제한 조회
+- 주소 없이 owner 가입 후 진행하는 주소 온보딩과 owner/member 역할별 안내
+- 행안부 도로명·상세주소 프록시, 직접 입력 폴백과 서버 판정 `verified`
 - 고정 4개 기기의 MQTT 연결·LED 설정, heartbeat와 HTTPS config polling
-- 최근 30일 KST 날짜별 알림, 최신 알림, 특정 알림 상세 조회
-- 가구별 WebSocket 기기 상태·신규 알림 전달
+- 최근 7일 KST 날짜별 알림, 최신 알림, `raw_label`을 포함한 특정 알림 상세 조회
+- 가구별 WebSocket 기기 상태와 `type`·`raw_label`을 포함한 신규 알림 전달
 - 보호자 연락처, device credential, MQTT 수집기
 - 공통 오류 응답과 로그인·초대 코드 요청 제한
 
@@ -29,7 +30,8 @@
 |---|---|
 | `dashboard_api_v2.py` | 기존 배포 명령과 호환되는 FastAPI 진입점 |
 | `hearo_backend/main.py` | API 라우트, 인증·권한, WebSocket |
-| `hearo_backend/services.py` | 회원가입·로그인·초대·30일 이력 서비스 |
+| `hearo_backend/services.py` | 회원가입·로그인·초대·7일 이력 서비스 |
+| `hearo_backend/juso.py` | 행안부 도로명·상세주소 검색 클라이언트 |
 | `hearo_backend/store.py` | 메모리 개발 저장소와 DynamoDB 운영 저장소 |
 | `hearo_backend/mqtt_bridge.py` | MQTT 상태·알림을 내부 API로 전달 |
 | `infra/aws-v2.yaml` | 최종 core·alerts 테이블과 EC2 최소 권한 역할 |
@@ -71,7 +73,7 @@ python -m uvicorn dashboard_api_v2:app --reload --port 8001
 curl http://127.0.0.1:8001/health
 ```
 
-Swagger UI는 `http://127.0.0.1:8001/docs`에서 확인합니다. 정상 기준은 전체 테스트 통과와 `{"status":"ok","version":"2.0.0"}` 응답입니다.
+Swagger UI는 `http://127.0.0.1:8001/docs`에서 확인합니다. 정상 기준은 전체 테스트 통과와 `{"status":"ok","version":"2.1.0"}` 응답입니다.
 
 ## 운영 데이터 주의사항
 
@@ -85,7 +87,7 @@ Sort key: event_key = UTC timestamp#event_id
 GSI: alarm_lookup_key = household_id#event_id
 ```
 
-30일 이력은 KST 범위를 UTC로 변환해 DynamoDB `Query`로 읽고 `Scan`을 사용하지 않습니다.
+7일 이력은 KST 범위를 UTC로 변환해 DynamoDB `Query`로 읽고 `Scan`을 사용하지 않습니다. 7일 이전 알림은 삭제하지 않으며 알림 상세 API로 계속 조회할 수 있습니다.
 
 ## 보안 원칙
 
@@ -93,17 +95,18 @@ GSI: alarm_lookup_key = household_id#event_id
 - 사용자 JWT, device credential, MQTT 비밀번호는 서로 다른 인증 정보입니다.
 - JWT·internal token은 각각 32자 이상의 독립 난수로 생성합니다.
 - 긴급 주소, 전화번호, token, credential을 로그에 출력하지 않습니다.
+- 행안부 검색 승인키는 EC2 환경변수에만 저장하고 프론트·응답·로그에 노출하지 않습니다.
 - 초대 코드 미리보기·구성원 목록·알림·WebSocket에는 긴급 주소를 포함하지 않습니다.
 - API는 단일 worker로 시작합니다. 다중 worker 전에는 WebSocket과 rate limit용 Redis가 필요합니다.
 
-## 배포 상태와 최종 확인
+## 배포 전 최종 확인
 
 - 기존 v1 `127.0.0.1:8000`을 유지하고 최종 v2를 `127.0.0.1:8001`에서 운영
 - `hearo-core-v2-final`, `hearo-alerts-v2-final` 테이블 사용
 - API와 MQTT 브리지를 systemd 자동 실행 서비스로 운영
 - MQTT TLS 8883 연결과 가구별 수집 경로 검증
 - 실제 프론트 도메인만 CORS에 등록
-- `/v2/health`, 회원가입·로그인·주소·기기·30일 이력 smoke test 완료
+- `/v2/health`, 회원가입·로그인·주소 온보딩·행안부 검색·기기·7일 이력·알림 상세 smoke test
 - MQTT bridge가 새 내부 API에 상태·알림을 저장하는지 확인
 - 모든 검증 후에만 프론트 base URL을 v2로 변경
 

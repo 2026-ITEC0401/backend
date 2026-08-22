@@ -8,7 +8,7 @@ import phonenumbers
 
 from .config import Settings
 from .domain import Device, EmergencyAddress, FIXED_DEVICES, Household, User, iso_utc, parse_timestamp
-from .history import group_thirty_day_history, thirty_day_utc_range
+from .history import group_history, history_utc_range
 from .security import (
     TokenManager,
     derive_invite_code,
@@ -78,17 +78,24 @@ def signup(repository, tokens: TokenManager, settings: Settings, request) -> dic
             consented_at=now,
         )
         address = request.emergency_address
-        if address is None or request.household_name is None:
+        if request.household_name is None:
             raise ValueError("신규 가구 등록 정보가 완전하지 않습니다.")
         household = Household(
             household_id=household_id,
             name=request.household_name,
             owner_user_id=user_id,
-            emergency_address=EmergencyAddress(
-                postal_code=address.postal_code,
-                road_address=address.road_address,
-                detail_address=address.detail_address,
-                address_provider=address.address_provider,
+            emergency_address=(
+                EmergencyAddress(
+                    postal_code=address.postal_code,
+                    road_address=address.road_address,
+                    detail_address=address.detail_address,
+                    address_provider=address.address_provider,
+                    # 가입 폼의 기존 주소 입력은 외부 공급자 응답을 서버가
+                    # 확인한 것이 아니므로 검증 완료로 간주하지 않습니다.
+                    verified=False,
+                )
+                if address is not None
+                else None
             ),
             invite_hash=invite_hash,
             invite_nonce=invite_nonce,
@@ -270,9 +277,9 @@ def device_status(device: Device, settings: Settings, now: datetime | None = Non
 
 
 def recent_history(repository, household_id: str, now: datetime | None = None) -> dict[str, Any]:
-    _, _, start, end_exclusive = thirty_day_utc_range(now)
+    _, _, start, end_exclusive = history_utc_range(now)
     alerts = repository.query_alerts(household_id, start, end_exclusive)
-    return group_thirty_day_history(alerts, now)
+    return group_history(alerts, now)
 
 
 def normalize_phone(phone: str) -> str:

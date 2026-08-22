@@ -25,6 +25,7 @@ from .config import Settings
 from .domain import Alert, EmergencyAddress, Household, User, iso_utc, parse_timestamp
 from .history import SEOUL
 from .integrations import create_mqtt_publisher
+from .juso import JusoClient, JusoError
 from .realtime import ConnectionManager
 from .schemas import (
     ConnectionRequest,
@@ -36,6 +37,8 @@ from .schemas import (
     InternalAlertRequest,
     InternalDeviceStateRequest,
     InviteCodeRequest,
+    JusoDetailSearchRequest,
+    JusoRoadSearchRequest,
     LoginRequest,
     PasswordChangeRequest,
     RefreshRequest,
@@ -93,10 +96,11 @@ def create_app(
     settings: Settings | None = None,
     repository=None,
     mqtt_publisher=None,
+    juso_client=None,
 ) -> FastAPI:
     app_settings = settings or Settings()
     app_settings.validate_for_production()
-    app = FastAPI(title="Hearo API", version="2.0.0")
+    app = FastAPI(title="Hearo API", version="2.1.0")
     app.add_middleware(
         CORSMiddleware,
         allow_origins=app_settings.cors_origins,
@@ -117,6 +121,7 @@ def create_app(
     app.state.limiter = SlidingWindowLimiter()
     app.state.realtime = ConnectionManager()
     app.state.mqtt = mqtt_publisher or create_mqtt_publisher(app_settings)
+    app.state.juso = juso_client or JusoClient(app_settings)
 
     @app.middleware("http")
     async def request_id_middleware(request: Request, call_next):
@@ -219,6 +224,24 @@ def create_app(
             raise _error(403, "OWNER_REQUIRED", "owner 권한이 필요합니다.")
         return user
 
+    def onboarding_status(user: User, household: Household) -> dict[str, Any]:
+        missing_address = household.emergency_address is None
+        return {
+            "required": missing_address,
+            "missing_steps": ["emergency_address"] if missing_address else [],
+            "next_action": (
+                "register_emergency_address"
+                if missing_address and user.role == "owner"
+                else "wait_for_owner"
+                if missing_address
+                else None
+            ),
+            "can_edit_emergency_address": user.role == "owner",
+        }
+
+    def raise_juso_error(exc: JusoError) -> None:
+        raise _error(exc.status_code, exc.code, str(exc)) from exc
+
     def device_from_credential(
         credential: Annotated[str | None, Header(alias="X-Device-Credential")] = None,
     ):
@@ -241,7 +264,7 @@ def create_app(
 
     @app.get("/health")
     def health() -> dict[str, str]:
-        return {"status": "ok", "version": "2.0.0"}
+        return {"status": "ok", "version": "2.1.0"}
 
     @app.post("/auth/signup", status_code=status.HTTP_201_CREATED)
     def auth_signup(payload: SignupRequest):
@@ -339,6 +362,7 @@ def create_app(
                 "member_count": app.state.repository.member_count(household.household_id),
             },
             "membership": {"role": user.role, "linked_at": user.linked_at},
+            "onboarding": onboarding_status(user, household),
         }
 
     @app.get("/households/{household_id}/invite-code")
@@ -471,17 +495,89 @@ def create_app(
     def update_emergency_address(
         household_id: str,
         payload: EmergencyAddressRequest,
-        _: Annotated[User, Depends(owner_user)],
+        request: Request,
+        owner: Annotated[User, Depends(owner_user)],
     ):
+        verified = False
+        detail_address = payload.detail_address
+        if payload.address_provider == "juso_go_kr" and payload.provider_reference:
+            key = _client_key(request, "address-verify", owner.user_id)
+            if not app.state.limiter.check(key, limit=30, window_seconds=60):
+                raise _error(429, "ADDRESS_SEARCH_RATE_LIMITED", "잠시 후 다시 시도하세요.")
+            reference = payload.provider_reference.model_dump()
+            try:
+                road_verified = app.state.juso.verify_road(
+                    postal_code=payload.postal_code,
+                    road_address=payload.road_address,
+                    reference=reference,
+                )
+                if not road_verified:
+                    raise _error(
+                        422,
+                        "ADDRESS_SELECTION_MISMATCH",
+                        "행안부 검색 결과와 주소가 일치하지 않습니다.",
+                    )
+                if payload.detail_source == "juso" and payload.juso_detail:
+                    detail_address = app.state.juso.verify_detail(
+                        reference, payload.juso_detail.model_dump()
+                    )
+                    if detail_address is None:
+                        raise _error(
+                            422,
+                            "ADDRESS_DETAIL_SELECTION_MISMATCH",
+                            "행안부 상세주소 결과와 선택값이 일치하지 않습니다.",
+                        )
+                    verified = True
+                elif payload.detail_source == "none":
+                    verified = not payload.provider_reference.apartment
+            except JusoError as exc:
+                raise_juso_error(exc)
         address = EmergencyAddress(
             postal_code=payload.postal_code,
             road_address=payload.road_address,
-            detail_address=payload.detail_address,
+            detail_address=detail_address,
             address_provider=payload.address_provider,
+            verified=verified,
         )
         return app.state.repository.update_household_emergency_address(
             household_id, address
         ).public()
+
+    @app.post("/households/{household_id}/address-search/roads")
+    def search_road_addresses(
+        household_id: str,
+        payload: JusoRoadSearchRequest,
+        request: Request,
+        owner: Annotated[User, Depends(owner_user)],
+    ):
+        key = _client_key(request, "address-search", owner.user_id)
+        if not app.state.limiter.check(key, limit=30, window_seconds=60):
+            raise _error(429, "ADDRESS_SEARCH_RATE_LIMITED", "잠시 후 다시 시도하세요.")
+        try:
+            return app.state.juso.search_roads(
+                payload.keyword, page=payload.page, page_size=payload.page_size
+            )
+        except JusoError as exc:
+            raise_juso_error(exc)
+
+    @app.post("/households/{household_id}/address-search/details")
+    def search_address_details(
+        household_id: str,
+        payload: JusoDetailSearchRequest,
+        request: Request,
+        owner: Annotated[User, Depends(owner_user)],
+    ):
+        key = _client_key(request, "address-search", owner.user_id)
+        if not app.state.limiter.check(key, limit=30, window_seconds=60):
+            raise _error(429, "ADDRESS_SEARCH_RATE_LIMITED", "잠시 후 다시 시도하세요.")
+        try:
+            return app.state.juso.search_details(
+                payload.provider_reference.model_dump(),
+                search_type=payload.search_type,
+                dong_name=payload.dong_name,
+            )
+        except JusoError as exc:
+            raise_juso_error(exc)
 
     @app.get("/households/{household_id}/devices")
     def devices(
@@ -659,6 +755,7 @@ def create_app(
                 "local_time": local_timestamp.isoformat(),
                 "location": alarm.location,
                 "sound": alarm.sound,
+                "raw_label": alarm.raw_label,
                 "type": alarm.type,
             }
         }
@@ -805,6 +902,8 @@ def create_app(
             "alarm": {
                 "id": alert.event_id,
                 "sound": alert.sound,
+                "raw_label": alert.raw_label,
+                "type": alert.type,
                 "location": alert.location,
                 "time": alert.timestamp,
             },
