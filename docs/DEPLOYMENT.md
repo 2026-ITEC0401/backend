@@ -1,6 +1,6 @@
 # Hearo 백엔드 v2 배포 및 롤백
 
-이 문서는 현재 검증한 EC2 병렬 배포 구조에 v2.1.1 변경을 반영하는 절차를 기준으로 합니다.
+이 문서는 현재 검증한 EC2 병렬 배포 구조에 v2.1.2 변경을 반영하는 절차를 기준으로 합니다.
 
 ```text
 Nginx HTTPS /v2/
@@ -43,7 +43,7 @@ python3 -m venv .venv
 ```
 
 ```text
-Hearo API 2.1.1
+Hearo API 2.1.2
 ```
 
 ## 3. DynamoDB

@@ -107,6 +107,7 @@ class MqttBridge:
             "raw_label": payload.get("raw_label"),
             "type": payload.get("type", "Urgent"),
             "confidence": payload.get("confidence"),
+            "model_version": payload.get("model_version"),
             "decision_source": payload.get("decision_source"),
             "confidence_kind": payload.get("confidence_kind"),
             "yamnet_family": payload.get("yamnet_family"),

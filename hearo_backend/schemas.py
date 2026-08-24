@@ -259,6 +259,7 @@ class InternalAlertRequest(StrictModel):
     raw_label: str | None = Field(default=None, max_length=100)
     type: Literal["Urgent", "Visitor", "Noise"]
     confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    model_version: str | None = Field(default=None, max_length=100)
     decision_source: str | None = Field(default=None, max_length=80)
     confidence_kind: str | None = Field(default=None, max_length=80)
     yamnet_family: str | None = Field(default=None, max_length=80)

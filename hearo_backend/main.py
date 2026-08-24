@@ -100,7 +100,7 @@ def create_app(
 ) -> FastAPI:
     app_settings = settings or Settings()
     app_settings.validate_for_production()
-    app = FastAPI(title="Hearo API", version="2.1.1")
+    app = FastAPI(title="Hearo API", version="2.1.2")
     app.add_middleware(
         CORSMiddleware,
         allow_origins=app_settings.cors_origins,
@@ -264,7 +264,7 @@ def create_app(
 
     @app.get("/health")
     def health() -> dict[str, str]:
-        return {"status": "ok", "version": "2.1.1"}
+        return {"status": "ok", "version": "2.1.2"}
 
     @app.post("/auth/signup", status_code=status.HTTP_201_CREATED)
     def auth_signup(payload: SignupRequest):
@@ -888,6 +888,7 @@ def create_app(
             type=payload.type,
             confidence=payload.confidence,
             raw_label=payload.raw_label,
+            model_version=payload.model_version,
             decision_source=payload.decision_source,
             confidence_kind=payload.confidence_kind,
             yamnet_family=payload.yamnet_family,

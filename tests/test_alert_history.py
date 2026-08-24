@@ -209,6 +209,7 @@ def test_hub_publisher_can_store_remote_capture_location_and_hybrid_diagnostics(
         "raw_label": "yamnet_critical_siren",
         "type": "Urgent",
         "confidence": 0.93,
+        "model_version": "hearo_classifier_v2",
         "decision_source": "yamnet_safety_override",
         "confidence_kind": "yamnet_family_score",
         "yamnet_family": "critical_siren",
@@ -238,6 +239,7 @@ def test_hub_publisher_can_store_remote_capture_location_and_hybrid_diagnostics(
     stored = api.repository.get_alert(household_id, "remote-alert-001")
     assert stored.publisher_device_id == "rpi-001"
     assert stored.source_device_id == "esp32_2"
+    assert stored.model_version == "hearo_classifier_v2"
     assert stored.decision_source == "yamnet_safety_override"
     assert stored.yamnet_family == "critical_siren"
 

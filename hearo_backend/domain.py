@@ -148,6 +148,7 @@ class Alert:
     type: str
     confidence: float | None = None
     raw_label: str | None = None
+    model_version: str | None = None
     publisher_device_id: str | None = None
     decision_source: str | None = None
     confidence_kind: str | None = None
