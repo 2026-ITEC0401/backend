@@ -61,19 +61,27 @@ def format_detail_address(item: dict[str, Any]) -> str:
 
 class JusoClient:
     def __init__(self, settings: Settings):
-        self.confirm_key = settings.juso_confirm_key
+        self.search_confirm_key = settings.juso_confirm_key
+        self.detail_confirm_key = settings.juso_detail_confirm_key
         self.timeout_seconds = settings.juso_timeout_seconds
 
-    def _request(self, url: str, params: dict[str, Any]) -> dict[str, Any]:
-        if not self.confirm_key:
+    def _request(
+        self,
+        url: str,
+        params: dict[str, Any],
+        *,
+        confirm_key: str,
+        provider_name: str,
+    ) -> dict[str, Any]:
+        if not confirm_key:
             raise JusoError(
-                "주소 검색 서비스가 설정되지 않았습니다.",
+                f"행안부 {provider_name} 서비스가 설정되지 않았습니다.",
                 code="ADDRESS_PROVIDER_NOT_CONFIGURED",
                 status_code=503,
             )
         provider_params = {
             **params,
-            "confmKey": self.confirm_key,
+            "confmKey": confirm_key,
             "resultType": "json",
         }
         try:
@@ -105,7 +113,7 @@ class JusoClient:
             return results
         if provider_code in {"E0001", "E0014"}:
             raise JusoError(
-                "주소 검색 서비스 승인키를 확인해야 합니다.",
+                f"행안부 {provider_name} 승인키를 확인해야 합니다.",
                 code="ADDRESS_PROVIDER_CONFIGURATION_ERROR",
                 status_code=503,
             )
@@ -145,6 +153,8 @@ class JusoClient:
                 "firstSort": "none",
                 "addInfoYn": "N",
             },
+            confirm_key=self.search_confirm_key,
+            provider_name="도로명주소 검색",
         )
         common = results["common"]
         items = []
@@ -185,7 +195,12 @@ class JusoClient:
         }
         if dong_name is not None:
             params["dongNm"] = dong_name
-        results = self._request(DETAIL_SEARCH_URL, params)
+        results = self._request(
+            DETAIL_SEARCH_URL,
+            params,
+            confirm_key=self.detail_confirm_key,
+            provider_name="상세주소 조회",
+        )
         values = []
         for raw in results.get("juso") or []:
             if not isinstance(raw, dict):

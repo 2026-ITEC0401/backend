@@ -2,8 +2,8 @@
 
 - 문서 상태: 구현 완료·배포 전 최종 검증본
 - 최초 작성일: 2026-08-17
-- 구현 반영일: 2026-08-22
-- API 구현 버전: 2.1.0 (`/v2` 외부 경로 유지)
+- 구현 반영일: 2026-08-24
+- API 구현 버전: 2.1.1 (`/v2` 외부 경로 유지)
 - 프론트 필드 활용 사전: [10. API 필드별 프론트 활용 가이드](#10-api-필드별-프론트-활용-가이드)
 
 ## 1. 서비스 규칙
@@ -515,6 +515,7 @@ POST /households/{household_id}/address-search/roads
 
 - owner만 호출할 수 있습니다.
 - 프론트에 행안부 승인키를 제공하지 않습니다.
+- 서버는 도로명주소 검색 API 승인키와 상세주소 API 승인키를 별도 환경변수로 관리합니다.
 - 검색어가 Nginx 접근 로그의 URL에 남지 않도록 JSON 본문을 사용하는 `POST`로 제공합니다.
 - `provider_reference`는 상세주소 조회와 최종 검증에만 사용하며 DynamoDB에는 저장하지 않습니다.
 - `page_size`는 1~20, 검색 요청은 사용자·IP 기준 분당 30회로 제한합니다.
@@ -583,7 +584,7 @@ POST /households/{household_id}/address-search/details
 }
 ```
 
-행안부 장애·시간 초과는 `503 ADDRESS_PROVIDER_UNAVAILABLE`, 승인키 설정 오류는 `503 ADDRESS_PROVIDER_CONFIGURATION_ERROR`, 검색 조건 오류는 `400 INVALID_ADDRESS_SEARCH`로 반환합니다. 상세주소 결과가 없어도 정상 응답의 `items=[]`, `manual_input_allowed=true`를 반환할 수 있습니다.
+행안부 장애·시간 초과는 `503 ADDRESS_PROVIDER_UNAVAILABLE`, 각 서비스의 승인키 설정 오류는 `503 ADDRESS_PROVIDER_CONFIGURATION_ERROR`, 검색 조건 오류는 `400 INVALID_ADDRESS_SEARCH`로 반환합니다. 상세주소 결과가 없어도 정상 응답의 `items=[]`, `manual_input_allowed=true`를 반환할 수 있습니다.
 
 ## 6. 기기 API
 

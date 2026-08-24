@@ -1,6 +1,6 @@
 # Hearo 백엔드 v2
 
-구현 기준일은 2026-08-22입니다. 이 소스는 기존에 배포한 v2에 최근 7일 알림, 주소 온보딩, 행안부 주소 검색과 알림 세부 필드를 반영한 v2.1 배포 후보입니다. EC2 반영 전에는 아래 테스트와 배포 문서의 smoke test를 다시 수행해야 합니다.
+구현 기준일은 2026-08-24입니다. 이 소스는 기존에 배포한 v2에 최근 7일 알림, 주소 온보딩, 행안부 주소 검색과 알림 세부 필드를 반영한 v2.1.1 배포 후보입니다. 도로명주소 검색과 상세주소 조회는 각각 별도로 발급받은 승인키를 사용합니다. EC2 반영 전에는 아래 테스트와 배포 문서의 smoke test를 다시 수행해야 합니다.
 
 - API 계약과 프론트 필드 활용 사전: [`docs/API_SPEC_V2_DRAFT.md`](./docs/API_SPEC_V2_DRAFT.md) 10절
 - 기존 샘플과의 차이: [`docs/API_SPEC_V2_SAMPLE_GAP.md`](./docs/API_SPEC_V2_SAMPLE_GAP.md)
@@ -73,7 +73,7 @@ python -m uvicorn dashboard_api_v2:app --reload --port 8001
 curl http://127.0.0.1:8001/health
 ```
 
-Swagger UI는 `http://127.0.0.1:8001/docs`에서 확인합니다. 정상 기준은 전체 테스트 통과와 `{"status":"ok","version":"2.1.0"}` 응답입니다.
+Swagger UI는 `http://127.0.0.1:8001/docs`에서 확인합니다. 정상 기준은 전체 테스트 통과와 `{"status":"ok","version":"2.1.1"}` 응답입니다.
 
 ## 운영 데이터 주의사항
 
@@ -95,7 +95,7 @@ GSI: alarm_lookup_key = household_id#event_id
 - 사용자 JWT, device credential, MQTT 비밀번호는 서로 다른 인증 정보입니다.
 - JWT·internal token은 각각 32자 이상의 독립 난수로 생성합니다.
 - 긴급 주소, 전화번호, token, credential을 로그에 출력하지 않습니다.
-- 행안부 검색 승인키는 EC2 환경변수에만 저장하고 프론트·응답·로그에 노출하지 않습니다.
+- 행안부 도로명주소 검색 승인키와 상세주소 승인키는 각각 별도 EC2 환경변수에만 저장하고 프론트·응답·로그에 노출하지 않습니다.
 - 초대 코드 미리보기·구성원 목록·알림·WebSocket에는 긴급 주소를 포함하지 않습니다.
 - API는 단일 worker로 시작합니다. 다중 worker 전에는 WebSocket과 rate limit용 Redis가 필요합니다.
 

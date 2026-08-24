@@ -305,9 +305,59 @@ def test_real_juso_client_maps_provider_response_without_exposing_key(monkeypatc
 
     monkeypatch.setattr("hearo_backend.juso.httpx.get", fake_get)
     client = JusoClient(
-        Settings(juso_confirm_key="server-side-search-key", juso_timeout_seconds=4)
+        Settings(
+            juso_confirm_key="server-side-search-key",
+            juso_detail_confirm_key="server-side-detail-key",
+            juso_timeout_seconds=4,
+        )
     )
     result = client.search_roads("대구 북구 대학로 80")
     assert result["items"][0]["provider_reference"] == REFERENCE
     assert captured["params"]["confmKey"] == "server-side-search-key"
     assert "server-side-search-key" not in str(result)
+
+
+def test_real_juso_client_uses_separate_detail_key(monkeypatch):
+    captured = {}
+
+    class Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "results": {
+                    "common": {
+                        "errorCode": "0",
+                        "errorMessage": "정상",
+                        "totalCount": "1",
+                    },
+                    "juso": [
+                        {
+                            "dongNm": "101",
+                            "floorNm": "9",
+                            "hoNm": "902",
+                        }
+                    ],
+                }
+            }
+
+    def fake_get(url, *, params, timeout, follow_redirects):
+        captured.update({"url": url, "params": params, "timeout": timeout})
+        assert follow_redirects is False
+        return Response()
+
+    monkeypatch.setattr("hearo_backend.juso.httpx.get", fake_get)
+    client = JusoClient(
+        Settings(
+            juso_confirm_key="server-side-search-key",
+            juso_detail_confirm_key="server-side-detail-key",
+            juso_timeout_seconds=4,
+        )
+    )
+    result = client.search_details(REFERENCE, search_type="dong")
+    assert result["items"][0]["formatted_detail_address"] == "101동 9층 902호"
+    assert captured["url"].endswith("/addrDetailApi.do")
+    assert captured["params"]["confmKey"] == "server-side-detail-key"
+    assert "server-side-search-key" not in str(captured["params"])
+    assert "server-side-detail-key" not in str(result)
