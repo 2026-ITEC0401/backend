@@ -41,6 +41,9 @@ class Settings:
     juso_confirm_key: str = field(
         default_factory=lambda: os.getenv("HEARO_JUSO_CONFIRM_KEY", "")
     )
+    juso_detail_confirm_key: str = field(
+        default_factory=lambda: os.getenv("HEARO_JUSO_DETAIL_CONFIRM_KEY", "")
+    )
     juso_timeout_seconds: float = field(
         default_factory=lambda: float(os.getenv("HEARO_JUSO_TIMEOUT_SECONDS", "5"))
     )
@@ -79,5 +82,10 @@ class Settings:
             raise RuntimeError("Production CORS origins must use HTTPS")
         if not self.juso_confirm_key or "REPLACE_WITH" in self.juso_confirm_key:
             raise RuntimeError("Production requires a non-placeholder Juso search API key")
+        if (
+            not self.juso_detail_confirm_key
+            or "REPLACE_WITH" in self.juso_detail_confirm_key
+        ):
+            raise RuntimeError("Production requires a non-placeholder Juso detail API key")
         if not 0 < self.juso_timeout_seconds <= 15:
             raise RuntimeError("HEARO_JUSO_TIMEOUT_SECONDS must be between 0 and 15")

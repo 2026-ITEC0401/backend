@@ -276,6 +276,7 @@ def test_production_requires_juso_search_api_key():
         mqtt_password="valid-mqtt-password",
         cors_origins=["https://frontend.example.com"],
         juso_confirm_key="",
+        juso_detail_confirm_key="valid-detail-api-key",
     )
     try:
         settings.validate_for_production()
@@ -283,3 +284,23 @@ def test_production_requires_juso_search_api_key():
         assert "Juso" in str(exc)
     else:
         raise AssertionError("production Juso search API key must be required")
+
+
+def test_production_requires_juso_detail_api_key():
+    settings = Settings(
+        environment="production",
+        store_backend="dynamodb",
+        jwt_secret="valid-jwt-secret-that-is-at-least-thirty-two-characters",
+        internal_token="valid-internal-token-that-is-at-least-thirty-two-characters",
+        mqtt_enabled=True,
+        mqtt_password="valid-mqtt-password",
+        cors_origins=["https://frontend.example.com"],
+        juso_confirm_key="valid-search-api-key",
+        juso_detail_confirm_key="",
+    )
+    try:
+        settings.validate_for_production()
+    except RuntimeError as exc:
+        assert "detail" in str(exc)
+    else:
+        raise AssertionError("production Juso detail API key must be required")
