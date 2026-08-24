@@ -3,7 +3,7 @@
 - 문서 상태: 구현 완료·배포 전 최종 검증본
 - 최초 작성일: 2026-08-17
 - 구현 반영일: 2026-08-24
-- API 구현 버전: 2.1.1 (`/v2` 외부 경로 유지)
+- API 구현 버전: 2.1.2 (`/v2` 외부 경로 유지)
 - 프론트 필드 활용 사전: [10. API 필드별 프론트 활용 가이드](#10-api-필드별-프론트-활용-가이드)
 
 ## 1. 서비스 규칙
@@ -1172,6 +1172,13 @@ WebSocket의 나머지 메시지와 모든 REST 필드의 활용 의도는 다�
 | `POST /internal/mqtt/device-state` | MQTT 브리지가 기기 상태를 FastAPI에 전달하는 내부 API입니다. |
 | `POST /internal/mqtt/alert` | MQTT 브리지가 분류 알림을 저장하고 WebSocket으로 전달하는 내부 API입니다. |
 | `GET /health` | 배포 상태 확인용 API입니다. 서비스 상태 점검에는 사용할 수 있지만 일반 화면 데이터 API는 아닙니다. |
+
+`POST /internal/mqtt/alert`는 사용자용 응답 필드 외에도 선택적인
+`model_version`, `decision_source`, `confidence_kind`, `yamnet_family`,
+`yamnet_score`, `hearo_confidence`, `applied_threshold`, `policy_version`을
+수용합니다. 이 값은 어떤 모델과 판정 정책이 알림을 만들었는지 운영·성능
+분석에 사용하며, 현재 사용자용 알림 상세 화면과 WebSocket에는 노출하지
+않습니다. 해당 필드가 없는 기존 Pi 이벤트도 계속 정상 처리합니다.
 
 ## 11. 프론트엔드 수정 확인 목록
 
