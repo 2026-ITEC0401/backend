@@ -65,7 +65,8 @@ class EmergencyAddress:
     postal_code: str
     road_address: str
     detail_address: str
-    address_provider: Literal["kakao_postcode", "juso_go_kr"]
+    address_provider: Literal["kakao_postcode", "juso_go_kr", "manual"]
+    verified: bool = False
     updated_at: str = field(default_factory=iso_utc)
 
     def public(self) -> dict[str, Any]:

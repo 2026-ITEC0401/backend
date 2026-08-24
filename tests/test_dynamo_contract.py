@@ -184,6 +184,26 @@ def test_final_user_and_household_deserialization_accepts_stored_maps():
     )
     decoded_household = DynamoRepository._household(asdict(household))
     assert decoded_household.emergency_address.postal_code == "41566"
+    assert decoded_household.emergency_address.verified is False
+
+
+def test_legacy_stored_address_without_verified_field_defaults_to_false():
+    decoded = DynamoRepository._household(
+        {
+            "household_id": "home-legacy",
+            "name": "기존 가구",
+            "owner_user_id": "owner-legacy",
+            "emergency_address": {
+                "postal_code": "41566",
+                "road_address": "대구광역시 북구 대학로 80",
+                "detail_address": "101동",
+                "address_provider": "kakao_postcode",
+                "updated_at": "2026-08-20T00:00:00Z",
+            },
+        }
+    )
+    assert decoded.emergency_address is not None
+    assert decoded.emergency_address.verified is False
 
 
 def test_put_alert_transaction_reserves_event_id_across_timestamps():

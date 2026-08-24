@@ -157,6 +157,28 @@ def test_contact_e164_and_websocket_authentication(api):
         event = websocket.receive_json()
         assert event["type"] == "device.status_changed"
         assert event["device_id"] == "esp32_3"
+
+        alert_response = api.client.post(
+            "/internal/mqtt/alert",
+            headers={"X-Internal-Token": api.settings.internal_token},
+            json={
+                "household_id": household_id,
+                "event_id": "websocket-alert-001",
+                "timestamp": iso_utc(),
+                "source_device_id": "rpi-001",
+                "location": "거실",
+                "sound": "도어락소리",
+                "raw_label": "도어락_개방음",
+                "type": "Visitor",
+                "confidence": 0.91,
+            },
+        )
+        assert alert_response.status_code == 200
+        alarm_event = websocket.receive_json()
+        assert alarm_event["type"] == "alarm.created"
+        assert alarm_event["alarm"]["raw_label"] == "도어락_개방음"
+        assert alarm_event["alarm"]["type"] == "Visitor"
+
         websocket.send_json({"type": "ping"})
         assert websocket.receive_json()["type"] == "pong"
 
@@ -242,3 +264,22 @@ def test_production_rejects_placeholder_secrets():
         assert "JWT" in str(exc)
     else:
         raise AssertionError("placeholder secret must be rejected")
+
+
+def test_production_requires_juso_search_api_key():
+    settings = Settings(
+        environment="production",
+        store_backend="dynamodb",
+        jwt_secret="valid-jwt-secret-that-is-at-least-thirty-two-characters",
+        internal_token="valid-internal-token-that-is-at-least-thirty-two-characters",
+        mqtt_enabled=True,
+        mqtt_password="valid-mqtt-password",
+        cors_origins=["https://frontend.example.com"],
+        juso_confirm_key="",
+    )
+    try:
+        settings.validate_for_production()
+    except RuntimeError as exc:
+        assert "Juso" in str(exc)
+    else:
+        raise AssertionError("production Juso search API key must be required")

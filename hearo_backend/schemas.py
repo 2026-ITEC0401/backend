@@ -31,16 +31,97 @@ class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class JusoProviderReference(StrictModel):
+    adm_cd: str = Field(pattern=r"^[0-9]{10}$")
+    road_name_code: str = Field(pattern=r"^[0-9]{12}$")
+    underground: Literal["0", "1"]
+    building_main_no: int = Field(ge=0)
+    building_sub_no: int = Field(ge=0)
+    apartment: bool
+
+
+class JusoDetailSelection(StrictModel):
+    dong_name: str | None = Field(default=None, max_length=100)
+    floor_name: str | None = Field(default=None, max_length=100)
+    ho_name: str | None = Field(default=None, max_length=100)
+
+    @field_validator("dong_name", "floor_name", "ho_name")
+    @classmethod
+    def normalize_detail_component(cls, value: str | None) -> str | None:
+        return _normalize_text(value) if value is not None else None
+
+    @model_validator(mode="after")
+    def require_detail_component(self):
+        if not any((self.dong_name, self.floor_name, self.ho_name)):
+            raise ValueError("동·층·호 중 하나 이상이 필요합니다.")
+        return self
+
+
 class EmergencyAddressRequest(StrictModel):
     postal_code: str = Field(pattern=r"^[0-9]{5}$")
     road_address: str = Field(min_length=5, max_length=200)
     detail_address: str = Field(default="", max_length=200)
-    address_provider: Literal["kakao_postcode", "juso_go_kr"]
+    address_provider: Literal["kakao_postcode", "juso_go_kr", "manual"]
+    provider_reference: JusoProviderReference | None = None
+    detail_source: Literal["juso", "manual", "none"] = "manual"
+    juso_detail: JusoDetailSelection | None = None
 
     @field_validator("road_address", "detail_address")
     @classmethod
     def normalize_address_text(cls, value: str, info):
         return _normalize_text(value, allow_empty=info.field_name == "detail_address")
+
+    @model_validator(mode="after")
+    def validate_provider_fields(self):
+        if self.address_provider != "juso_go_kr":
+            if self.provider_reference is not None or self.juso_detail is not None:
+                raise ValueError("행안부 참조 정보는 juso_go_kr 주소에만 사용할 수 있습니다.")
+            if self.detail_source == "juso":
+                raise ValueError("행안부 상세주소에는 juso_go_kr 공급자가 필요합니다.")
+            return self
+        if self.detail_source == "juso":
+            if self.provider_reference is None or self.juso_detail is None:
+                raise ValueError("검증된 상세주소에는 행안부 참조 정보가 필요합니다.")
+            if not (self.juso_detail.floor_name or self.juso_detail.ho_name):
+                raise ValueError("검증된 상세주소에는 층 또는 호 정보가 필요합니다.")
+        elif self.juso_detail is not None:
+            raise ValueError("juso_detail은 detail_source=juso일 때만 사용할 수 있습니다.")
+        return self
+
+
+class JusoDetailSearchRequest(StrictModel):
+    provider_reference: JusoProviderReference
+    search_type: Literal["dong", "floorho"]
+    dong_name: str | None = Field(default=None, max_length=100)
+
+    @field_validator("dong_name")
+    @classmethod
+    def normalize_dong_name(cls, value: str | None) -> str | None:
+        return _normalize_text(value) if value is not None else None
+
+    @model_validator(mode="after")
+    def validate_search_type(self):
+        if self.search_type == "floorho" and self.dong_name is None:
+            raise ValueError("층·호 검색에는 dong_name이 필요합니다.")
+        if self.search_type == "dong" and self.dong_name is not None:
+            raise ValueError("동 검색에는 dong_name을 입력하지 않습니다.")
+        return self
+
+
+class JusoRoadSearchRequest(StrictModel):
+    keyword: str = Field(min_length=2, max_length=80)
+    page: int = Field(default=1, ge=1, le=900)
+    page_size: int = Field(default=10, ge=1, le=20)
+
+    @field_validator("keyword")
+    @classmethod
+    def normalize_keyword(cls, value: str) -> str:
+        normalized = " ".join(_normalize_text(value).split())
+        if len(normalized) < 2:
+            raise ValueError("주소 검색어를 두 글자 이상 입력해 주세요.")
+        if any(character in normalized for character in "%=><[]"):
+            raise ValueError("주소 검색어에 %, =, >, <, [, ] 문자를 사용할 수 없습니다.")
+        return normalized
 
 
 class SignupRequest(StrictModel):
@@ -79,8 +160,6 @@ class SignupRequest(StrictModel):
         if self.signup_type == "new_household":
             if self.household_name is None:
                 raise ValueError("신규 가구 등록에는 household_name이 필요합니다.")
-            if self.emergency_address is None:
-                raise ValueError("신규 가구 등록에는 emergency_address가 필요합니다.")
         elif self.household_name is not None or self.emergency_address is not None:
             raise ValueError("가족 참여 가입에는 가구 이름이나 주소를 입력하지 않습니다.")
         return self

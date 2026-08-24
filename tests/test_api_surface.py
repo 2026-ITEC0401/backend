@@ -34,6 +34,8 @@ def test_openapi_matches_the_final_frontend_contract(api):
         ),
         ("/households/{household_id}/emergency-address", "get"),
         ("/households/{household_id}/emergency-address", "patch"),
+        ("/households/{household_id}/address-search/roads", "post"),
+        ("/households/{household_id}/address-search/details", "post"),
         ("/households/{household_id}/devices", "get"),
         (
             "/households/{household_id}/devices/{device_id}/connection",

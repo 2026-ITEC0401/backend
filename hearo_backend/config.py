@@ -38,6 +38,12 @@ class Settings:
     mqtt_ca_path: str = field(default_factory=lambda: os.getenv("HEARO_MQTT_CA_PATH", "/etc/ssl/certs/ca-certificates.crt"))
     mqtt_enabled: bool = field(default_factory=lambda: os.getenv("HEARO_MQTT_ENABLED", "false").lower() == "true")
     internal_token: str = field(default_factory=lambda: os.getenv("HEARO_INTERNAL_TOKEN", "development-internal-token"))
+    juso_confirm_key: str = field(
+        default_factory=lambda: os.getenv("HEARO_JUSO_CONFIRM_KEY", "")
+    )
+    juso_timeout_seconds: float = field(
+        default_factory=lambda: float(os.getenv("HEARO_JUSO_TIMEOUT_SECONDS", "5"))
+    )
 
     def validate_for_production(self) -> None:
         if self.environment != "production":
@@ -71,3 +77,7 @@ class Settings:
             raise RuntimeError("Production MQTT must use the TLS listener on port 8883")
         if any(not origin.startswith("https://") for origin in self.cors_origins):
             raise RuntimeError("Production CORS origins must use HTTPS")
+        if not self.juso_confirm_key or "REPLACE_WITH" in self.juso_confirm_key:
+            raise RuntimeError("Production requires a non-placeholder Juso search API key")
+        if not 0 < self.juso_timeout_seconds <= 15:
+            raise RuntimeError("HEARO_JUSO_TIMEOUT_SECONDS must be between 0 and 15")
