@@ -105,7 +105,7 @@ GSI: alarm_lookup_key = household_id#event_id
 - `hearo-core-v2-final`, `hearo-alerts-v2-final` 테이블 사용
 - API와 MQTT 브리지를 systemd 자동 실행 서비스로 운영
 - MQTT TLS 8883 연결과 가구별 수집 경로 검증
-- 실제 프론트 도메인만 CORS에 등록
+- 실제 HTTPS 프론트 도메인과 승인된 로컬 개발 출처 `http://localhost:5173`만 CORS에 등록
 - `/v2/health`, 회원가입·로그인·주소 온보딩·행안부 검색·기기·7일 이력·알림 상세 smoke test
 - MQTT bridge가 새 내부 API에 상태·알림을 저장하는지 확인
 - 모든 검증 후에만 프론트 base URL을 v2로 변경

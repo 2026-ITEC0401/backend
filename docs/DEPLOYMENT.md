@@ -68,6 +68,8 @@ sudo install -o root -g root -m 600 infra/hearo-mqtt-bridge.env.example /etc/hea
 
 두 파일의 `HEARO_INTERNAL_TOKEN`은 같아야 합니다. JWT secret, internal token, API MQTT 비밀번호, 브리지 MQTT 비밀번호는 각각 별도로 생성합니다.
 
+운영 CORS는 실제 HTTPS 프론트 주소를 사용합니다. 로컬 Vite 개발을 위해서는 정확히 `http://localhost:5173`만 HTTP 예외로 추가할 수 있으며, 다른 HTTP 호스트나 포트는 운영 검증에서 거부됩니다.
+
 API 환경 파일에는 행안부 **검색 API** 승인키, 별도로 발급받은 **상세주소 API** 승인키와 제한 시간을 추가합니다. 승인키는 Git이나 프론트 환경변수에 저장하지 않습니다.
 
 ```dotenv
