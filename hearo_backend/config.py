@@ -78,8 +78,18 @@ class Settings:
             raise RuntimeError("Production requires a non-placeholder MQTT password")
         if self.mqtt_port != 8883:
             raise RuntimeError("Production MQTT must use the TLS listener on port 8883")
-        if any(not origin.startswith("https://") for origin in self.cors_origins):
-            raise RuntimeError("Production CORS origins must use HTTPS")
+        allowed_http_origins = {
+            "http://localhost:5173",
+        }
+        if any(
+            not origin.startswith("https://")
+            and origin not in allowed_http_origins
+            for origin in self.cors_origins
+        ):
+            raise RuntimeError(
+                "Production CORS origins must use HTTPS "
+                "except approved localhost development origins"
+            )
         if not self.juso_confirm_key or "REPLACE_WITH" in self.juso_confirm_key:
             raise RuntimeError("Production requires a non-placeholder Juso search API key")
         if (
