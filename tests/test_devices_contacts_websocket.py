@@ -320,9 +320,54 @@ def test_production_allows_exact_vite_localhost_origin():
         ],
         juso_confirm_key="valid-search-api-key",
         juso_detail_confirm_key="valid-detail-api-key",
+        alarm_unread_baseline_at="2026-08-30T00:00:00Z",
     )
 
     settings.validate_for_production()
+
+
+def test_production_requires_fixed_alarm_unread_baseline():
+    settings = Settings(
+        environment="production",
+        store_backend="dynamodb",
+        jwt_secret="valid-jwt-secret-that-is-at-least-thirty-two-characters",
+        internal_token="valid-internal-token-that-is-at-least-thirty-two-characters",
+        mqtt_enabled=True,
+        mqtt_password="valid-mqtt-password",
+        cors_origins=["https://frontend.example.com"],
+        juso_confirm_key="valid-search-api-key",
+        juso_detail_confirm_key="valid-detail-api-key",
+        alarm_unread_baseline_at="",
+    )
+
+    try:
+        settings.validate_for_production()
+    except RuntimeError as exc:
+        assert "HEARO_ALARM_UNREAD_BASELINE_AT" in str(exc)
+    else:
+        raise AssertionError("production alarm unread baseline must be required")
+
+
+def test_production_rejects_alarm_unread_baseline_without_timezone():
+    settings = Settings(
+        environment="production",
+        store_backend="dynamodb",
+        jwt_secret="valid-jwt-secret-that-is-at-least-thirty-two-characters",
+        internal_token="valid-internal-token-that-is-at-least-thirty-two-characters",
+        mqtt_enabled=True,
+        mqtt_password="valid-mqtt-password",
+        cors_origins=["https://frontend.example.com"],
+        juso_confirm_key="valid-search-api-key",
+        juso_detail_confirm_key="valid-detail-api-key",
+        alarm_unread_baseline_at="2026-08-30T00:00:00",
+    )
+
+    try:
+        settings.validate_for_production()
+    except RuntimeError as exc:
+        assert "UTC offset" in str(exc)
+    else:
+        raise AssertionError("timezone-less alarm unread baseline must be rejected")
 
 
 def test_production_rejects_other_insecure_local_origin():
@@ -336,6 +381,7 @@ def test_production_rejects_other_insecure_local_origin():
         cors_origins=["http://localhost:5174"],
         juso_confirm_key="valid-search-api-key",
         juso_detail_confirm_key="valid-detail-api-key",
+        alarm_unread_baseline_at="2026-08-30T00:00:00Z",
     )
 
     try:

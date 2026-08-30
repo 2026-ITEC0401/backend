@@ -1,6 +1,6 @@
 # Hearo 백엔드 v2
 
-구현 기준일은 2026-08-24입니다. 이 소스는 기존에 배포한 v2에 최근 7일 알림, 주소 온보딩, 행안부 주소 검색과 알림 세부 필드를 반영한 v2.1.2 배포 후보입니다. v2.1.2는 Pi 분류 이벤트의 선택적 `model_version`을 내부 알림 계약에 추가합니다. 도로명주소 검색과 상세주소 조회는 각각 별도로 발급받은 승인키를 사용합니다. EC2 반영 전에는 아래 테스트와 배포 문서의 smoke test를 다시 수행해야 합니다.
+구현 기준일은 2026-08-30입니다. v2.2.0은 최근 7일 알림, 주소 온보딩, 행안부 주소 검색과 알림 세부 필드에 더해 사용자별 알림 확인 시각과 미확인 개수 API를 제공합니다. Pi 분류 이벤트의 선택적 `model_version`을 내부 알림 계약에 저장하며, 도로명주소 검색과 상세주소 조회는 각각 별도로 발급받은 승인키를 사용합니다. EC2 반영 전에는 아래 테스트와 배포 문서의 smoke test를 다시 수행해야 합니다.
 
 - API 계약과 프론트 필드 활용 사전: [`docs/API_SPEC_V2_DRAFT.md`](./docs/API_SPEC_V2_DRAFT.md) 10절
 - 기존 샘플과의 차이: [`docs/API_SPEC_V2_SAMPLE_GAP.md`](./docs/API_SPEC_V2_SAMPLE_GAP.md)
@@ -18,6 +18,7 @@
 - 행안부 도로명·상세주소 프록시, 직접 입력 폴백과 서버 판정 `verified`
 - 고정 4개 기기의 MQTT 연결·LED 설정, heartbeat와 HTTPS config polling
 - 최근 7일 KST 날짜별 알림, 최신 알림, `raw_label`을 포함한 특정 알림 상세 조회
+- owner/member별 마지막 알림 확인 시각과 최근 7일 미확인 개수 조회·모두 확인 처리
 - 가구별 WebSocket 기기 상태와 `type`·`raw_label`을 포함한 신규 알림 전달
 - 보호자 연락처, device credential, MQTT 수집기
 - 공통 오류 응답과 로그인·초대 코드 요청 제한
@@ -73,7 +74,7 @@ python -m uvicorn dashboard_api_v2:app --reload --port 8001
 curl http://127.0.0.1:8001/health
 ```
 
-Swagger UI는 `http://127.0.0.1:8001/docs`에서 확인합니다. 정상 기준은 전체 테스트 통과와 `{"status":"ok","version":"2.1.2"}` 응답입니다.
+Swagger UI는 `http://127.0.0.1:8001/docs`에서 확인합니다. 정상 기준은 전체 테스트 통과와 `{"status":"ok","version":"2.2.0"}` 응답입니다.
 
 ## 운영 데이터 주의사항
 
@@ -88,6 +89,8 @@ GSI: alarm_lookup_key = household_id#event_id
 ```
 
 7일 이력은 KST 범위를 UTC로 변환해 DynamoDB `Query`로 읽고 `Scan`을 사용하지 않습니다. 7일 이전 알림은 삭제하지 않으며 알림 상세 API로 계속 조회할 수 있습니다.
+
+사용자별 알림 확인 시각은 core 테이블의 `HOUSE#{household_id}` / `MEMBER#{user_id}` 관계 레코드에 `alarms_last_seen_at`으로 저장합니다. 개별 알림에는 사용자별 `read` 필드를 추가하지 않습니다.
 
 ## 보안 원칙
 
@@ -106,7 +109,7 @@ GSI: alarm_lookup_key = household_id#event_id
 - API와 MQTT 브리지를 systemd 자동 실행 서비스로 운영
 - MQTT TLS 8883 연결과 가구별 수집 경로 검증
 - 실제 HTTPS 프론트 도메인과 승인된 로컬 개발 출처 `http://localhost:5173`만 CORS에 등록
-- `/v2/health`, 회원가입·로그인·주소 온보딩·행안부 검색·기기·7일 이력·알림 상세 smoke test
+- `/v2/health`, 회원가입·로그인·주소 온보딩·행안부 검색·기기·7일 이력·미확인 개수·모두 확인·알림 상세 smoke test
 - MQTT bridge가 새 내부 API에 상태·알림을 저장하는지 확인
 - 모든 검증 후에만 프론트 base URL을 v2로 변경
 

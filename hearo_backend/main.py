@@ -52,12 +52,14 @@ from .services import (
     device_status,
     link_household,
     login,
+    mark_all_alarms_seen,
     normalize_phone,
     preview_invite,
     recent_history,
     refresh,
     rotate_invite,
     signup,
+    unread_alarm_summary,
 )
 from .store import (
     ConflictError,
@@ -100,7 +102,7 @@ def create_app(
 ) -> FastAPI:
     app_settings = settings or Settings()
     app_settings.validate_for_production()
-    app = FastAPI(title="Hearo API", version="2.1.2")
+    app = FastAPI(title="Hearo API", version="2.2.0")
     app.add_middleware(
         CORSMiddleware,
         allow_origins=app_settings.cors_origins,
@@ -122,6 +124,11 @@ def create_app(
     app.state.realtime = ConnectionManager()
     app.state.mqtt = mqtt_publisher or create_mqtt_publisher(app_settings)
     app.state.juso = juso_client or JusoClient(app_settings)
+    app.state.alarm_unread_baseline_at = (
+        iso_utc(parse_timestamp(app_settings.alarm_unread_baseline_at))
+        if app_settings.alarm_unread_baseline_at
+        else iso_utc()
+    )
 
     @app.middleware("http")
     async def request_id_middleware(request: Request, call_next):
@@ -264,7 +271,7 @@ def create_app(
 
     @app.get("/health")
     def health() -> dict[str, str]:
-        return {"status": "ok", "version": "2.1.2"}
+        return {"status": "ok", "version": "2.2.0"}
 
     @app.post("/auth/signup", status_code=status.HTTP_201_CREATED)
     def auth_signup(payload: SignupRequest):
@@ -737,6 +744,29 @@ def create_app(
         _: Annotated[User, Depends(household_user)],
     ):
         return recent_history(app.state.repository, household_id)
+
+    @app.get("/households/{household_id}/alarms/unread-count")
+    def alarm_unread_count(
+        household_id: str,
+        user: Annotated[User, Depends(household_user)],
+    ):
+        return unread_alarm_summary(
+            app.state.repository,
+            household_id,
+            user.user_id,
+            app.state.alarm_unread_baseline_at,
+        )
+
+    @app.patch("/households/{household_id}/alarms/seen")
+    def mark_alarm_history_seen(
+        household_id: str,
+        user: Annotated[User, Depends(household_user)],
+    ):
+        return mark_all_alarms_seen(
+            app.state.repository,
+            household_id,
+            user.user_id,
+        )
 
     @app.get("/households/{household_id}/alarms/{alarm_id}")
     def alarm_detail(

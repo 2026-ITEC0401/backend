@@ -44,6 +44,8 @@ def test_openapi_matches_the_final_frontend_contract(api):
         ("/households/{household_id}/devices/{device_id}/settings", "patch"),
         ("/households/{household_id}/alarms/latest", "get"),
         ("/households/{household_id}/alarms/history", "get"),
+        ("/households/{household_id}/alarms/unread-count", "get"),
+        ("/households/{household_id}/alarms/seen", "patch"),
         ("/households/{household_id}/alarms/{alarm_id}", "get"),
     }
     for path, method in expected:

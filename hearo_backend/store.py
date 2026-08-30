@@ -62,6 +62,7 @@ class MemoryRepository:
         self.refresh_tokens: dict[str, dict[str, Any]] = {}
         self.contacts: dict[str, dict[str, dict[str, Any]]] = {}
         self.alerts: dict[str, list[Alert]] = {}
+        self.alarm_last_seen: dict[tuple[str, str], str] = {}
         self._lock = threading.RLock()
 
     def create_owner(
@@ -77,6 +78,9 @@ class MemoryRepository:
             self.users_by_phone[user.phone_number] = user.user_id
             self.households[household.household_id] = household
             self.members[household.household_id] = {user.user_id}
+            self.alarm_last_seen[(household.household_id, user.user_id)] = (
+                user.linked_at or user.created_at
+            )
             self.contacts[household.household_id] = {}
             self.alerts[household.household_id] = []
             for device in devices:
@@ -194,7 +198,35 @@ class MemoryRepository:
             user.household_link_status = "linked"
             user.linked_at = iso_utc(now)
             self.members.setdefault(household.household_id, set()).add(user.user_id)
+            self.alarm_last_seen[(household.household_id, user.user_id)] = user.linked_at
             return user
+
+    def get_or_initialize_alarm_last_seen(
+        self,
+        household_id: str,
+        user_id: str,
+        baseline_at: str,
+    ) -> str:
+        with self._lock:
+            if user_id not in self.members.get(household_id, set()):
+                raise NotFoundError("가구 구성원을 찾을 수 없습니다.")
+            key = (household_id, user_id)
+            return self.alarm_last_seen.setdefault(key, baseline_at)
+
+    def mark_alarms_seen(
+        self,
+        household_id: str,
+        user_id: str,
+        seen_at: str,
+    ) -> str:
+        with self._lock:
+            if user_id not in self.members.get(household_id, set()):
+                raise NotFoundError("가구 구성원을 찾을 수 없습니다.")
+            key = (household_id, user_id)
+            current = self.alarm_last_seen.get(key)
+            if current is None or parse_timestamp(current) <= parse_timestamp(seen_at):
+                self.alarm_last_seen[key] = seen_at
+            return self.alarm_last_seen[key]
 
     def rotate_invite(
         self,
@@ -240,6 +272,7 @@ class MemoryRepository:
                 affected = list(self.members.get(household_id, set()))
                 for member_id in affected:
                     member = self.users[member_id]
+                    self.alarm_last_seen.pop((household_id, member_id), None)
                     member.household_id = None
                     member.role = None
                     member.household_link_status = "unlinked"
@@ -247,6 +280,7 @@ class MemoryRepository:
                 self.members[household_id] = set()
                 return {"household_link_status": "unlinked", "household_status": "inactive"}
             self.members.get(household_id, set()).discard(user.user_id)
+            self.alarm_last_seen.pop((household_id, user.user_id), None)
             user.household_id = None
             user.role = None
             user.household_link_status = "unlinked"
@@ -503,6 +537,7 @@ class DynamoRepository:
                         "sk": f"MEMBER#{user.user_id}",
                         "user_id": user.user_id,
                         "linked_at": user.linked_at,
+                        "alarms_last_seen_at": user.linked_at or user.created_at,
                     }
                 )
             },
@@ -784,6 +819,7 @@ class DynamoRepository:
                                     "sk": f"MEMBER#{user_id}",
                                     "user_id": user_id,
                                     "linked_at": linked_at,
+                                    "alarms_last_seen_at": linked_at,
                                 }
                             ),
                             "ConditionExpression": "attribute_not_exists(pk)",
@@ -794,6 +830,63 @@ class DynamoRepository:
         except Exception as exc:
             raise ConflictError("가구 연동 상태가 변경되어 다시 시도해야 합니다.", code="HOUSEHOLD_LINK_CONFLICT") from exc
         return self.get_user(user_id)
+
+    def get_or_initialize_alarm_last_seen(
+        self,
+        household_id: str,
+        user_id: str,
+        baseline_at: str,
+    ) -> str:
+        key = {
+            "pk": f"HOUSE#{household_id}",
+            "sk": f"MEMBER#{user_id}",
+        }
+        try:
+            result = self.core.update_item(
+                Key=key,
+                UpdateExpression=(
+                    "SET alarms_last_seen_at="
+                    "if_not_exists(alarms_last_seen_at, :baseline)"
+                ),
+                ConditionExpression="attribute_exists(pk)",
+                ExpressionAttributeValues={":baseline": baseline_at},
+                ReturnValues="ALL_NEW",
+            )
+        except self.client.exceptions.ConditionalCheckFailedException as exc:
+            raise NotFoundError("가구 구성원을 찾을 수 없습니다.") from exc
+        return result["Attributes"]["alarms_last_seen_at"]
+
+    def mark_alarms_seen(
+        self,
+        household_id: str,
+        user_id: str,
+        seen_at: str,
+    ) -> str:
+        key = {
+            "pk": f"HOUSE#{household_id}",
+            "sk": f"MEMBER#{user_id}",
+        }
+        try:
+            result = self.core.update_item(
+                Key=key,
+                UpdateExpression="SET alarms_last_seen_at=:seen",
+                ConditionExpression=(
+                    "attribute_exists(pk) AND "
+                    "(attribute_not_exists(alarms_last_seen_at) "
+                    "OR alarms_last_seen_at <= :seen)"
+                ),
+                ExpressionAttributeValues={":seen": seen_at},
+                ReturnValues="ALL_NEW",
+            )
+            return result["Attributes"]["alarms_last_seen_at"]
+        except self.client.exceptions.ConditionalCheckFailedException as exc:
+            current = self.core.get_item(Key=key).get("Item")
+            if not current:
+                raise NotFoundError("가구 구성원을 찾을 수 없습니다.") from exc
+            value = current.get("alarms_last_seen_at")
+            if not value:
+                raise StoreError("알림 확인 시각을 갱신하지 못했습니다.") from exc
+            return str(value)
 
     def rotate_invite(
         self,

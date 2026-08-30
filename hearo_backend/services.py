@@ -8,7 +8,7 @@ import phonenumbers
 
 from .config import Settings
 from .domain import Device, EmergencyAddress, FIXED_DEVICES, Household, User, iso_utc, parse_timestamp
-from .history import group_history, history_utc_range
+from .history import HISTORY_DAYS, group_history, history_utc_range
 from .security import (
     TokenManager,
     derive_invite_code,
@@ -280,6 +280,57 @@ def recent_history(repository, household_id: str, now: datetime | None = None) -
     _, _, start, end_exclusive = history_utc_range(now)
     alerts = repository.query_alerts(household_id, start, end_exclusive)
     return group_history(alerts, now)
+
+
+def unread_alarm_summary(
+    repository,
+    household_id: str,
+    user_id: str,
+    baseline_at: str,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    current = (now or datetime.now(UTC)).astimezone(UTC)
+    last_seen_value = repository.get_or_initialize_alarm_last_seen(
+        household_id,
+        user_id,
+        baseline_at,
+    )
+    last_seen = parse_timestamp(last_seen_value)
+    _, _, window_start, _ = history_utc_range(current)
+    if last_seen >= current:
+        unread_count = 0
+    else:
+        query_start = max(window_start, last_seen)
+        alerts = repository.query_alerts(
+            household_id,
+            query_start,
+            current + timedelta(microseconds=1),
+        )
+        unread_count = sum(
+            1
+            for alert in alerts
+            if window_start <= parse_timestamp(alert.timestamp) <= current
+            and parse_timestamp(alert.timestamp) > last_seen
+        )
+    return {
+        "unread_count": unread_count,
+        "last_seen_at": iso_utc(last_seen),
+        "window_days": HISTORY_DAYS,
+    }
+
+
+def mark_all_alarms_seen(
+    repository,
+    household_id: str,
+    user_id: str,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    seen_at = iso_utc((now or datetime.now(UTC)).astimezone(UTC))
+    stored = repository.mark_alarms_seen(household_id, user_id, seen_at)
+    return {
+        "unread_count": 0,
+        "last_seen_at": iso_utc(parse_timestamp(stored)),
+    }
 
 
 def normalize_phone(phone: str) -> str:

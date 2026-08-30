@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+from datetime import datetime
 
 
 def _csv_env(name: str, default: str) -> list[str]:
@@ -46,6 +47,9 @@ class Settings:
     )
     juso_timeout_seconds: float = field(
         default_factory=lambda: float(os.getenv("HEARO_JUSO_TIMEOUT_SECONDS", "5"))
+    )
+    alarm_unread_baseline_at: str = field(
+        default_factory=lambda: os.getenv("HEARO_ALARM_UNREAD_BASELINE_AT", "")
     )
 
     def validate_for_production(self) -> None:
@@ -99,3 +103,17 @@ class Settings:
             raise RuntimeError("Production requires a non-placeholder Juso detail API key")
         if not 0 < self.juso_timeout_seconds <= 15:
             raise RuntimeError("HEARO_JUSO_TIMEOUT_SECONDS must be between 0 and 15")
+        if not self.alarm_unread_baseline_at:
+            raise RuntimeError("Production requires HEARO_ALARM_UNREAD_BASELINE_AT")
+        try:
+            baseline = datetime.fromisoformat(
+                self.alarm_unread_baseline_at.replace("Z", "+00:00")
+            )
+        except ValueError as exc:
+            raise RuntimeError(
+                "HEARO_ALARM_UNREAD_BASELINE_AT must be an ISO 8601 timestamp"
+            ) from exc
+        if baseline.tzinfo is None:
+            raise RuntimeError(
+                "HEARO_ALARM_UNREAD_BASELINE_AT must include a UTC offset"
+            )

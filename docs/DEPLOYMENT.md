@@ -1,6 +1,6 @@
 # Hearo 백엔드 v2 배포 및 롤백
 
-이 문서는 현재 검증한 EC2 병렬 배포 구조에 v2.1.2 변경을 반영하는 절차를 기준으로 합니다.
+이 문서는 현재 검증한 EC2 병렬 배포 구조에 v2.2.0 변경을 반영하는 절차를 기준으로 합니다.
 
 ```text
 Nginx HTTPS /v2/
@@ -26,10 +26,10 @@ FastAPI 내부 MQTT 수집 API
 
 ## 2. 코드와 의존성
 
-검증된 릴리스 디렉터리는 `/opt/hearo-backend-v2-r2`입니다.
+v2.2.0 신규 릴리스 디렉터리는 `/opt/hearo-backend-v2-r4`를 사용합니다. 운영 전환 전까지 현재 r3 디렉터리를 유지합니다.
 
 ```bash
-cd /opt/hearo-backend-v2-r2
+cd /opt/hearo-backend-v2-r4
 python3 -m venv .venv
 .venv/bin/python -m pip install --upgrade pip
 .venv/bin/python -m pip install -r requirements.txt
@@ -43,7 +43,7 @@ python3 -m venv .venv
 ```
 
 ```text
-Hearo API 2.1.2
+Hearo API 2.2.0
 ```
 
 ## 3. DynamoDB
@@ -76,7 +76,10 @@ API 환경 파일에는 행안부 **검색 API** 승인키, 별도로 발급받�
 HEARO_JUSO_CONFIRM_KEY=행안부_검색_API_승인키
 HEARO_JUSO_DETAIL_CONFIRM_KEY=행안부_상세주소_API_승인키
 HEARO_JUSO_TIMEOUT_SECONDS=5
+HEARO_ALARM_UNREAD_BASELINE_AT=2026-08-30T00:00:00Z
 ```
+
+`HEARO_ALARM_UNREAD_BASELINE_AT`은 v2.2.0 운영 전환 직전 `date -u`로 확인한 UTC 시각을 ISO 8601 `Z` 형식으로 한 번만 기록합니다. 기존 구성원의 최초 미확인 계산 기준이므로 서비스 재시작이나 재배포 때 임의로 변경하지 않습니다. 신규 owner/member는 각각 가구 생성·연동 시각을 별도로 저장합니다.
 
 ## 5. systemd
 
@@ -116,12 +119,15 @@ sudo systemctl enable --now hearo-mqtt-bridge-v2-final
 7. MQTT 브리지가 `MQTT bridge subscribed to household-scoped topics`를 기록합니다.
 8. 실제 알림을 발행한 뒤 최신·이력·상세조회 응답이 일치하고 상세 응답에 `raw_label`이 있습니다.
 9. WebSocket `alarm.created`의 `alarm` 객체에 `type`과 `raw_label`이 있습니다.
+10. 기존 owner의 첫 `GET .../alarms/unread-count`가 배포 이전 알림을 0건으로 처리합니다.
+11. 배포 후 새 알림을 생성하면 owner와 member의 미확인 개수가 각각 증가합니다.
+12. owner가 `PATCH .../alarms/seen`을 호출하면 owner만 0이 되고 member 개수는 유지됩니다.
 
 회원가입 응답의 device credential은 한 번만 원문으로 반환되므로 안전하게 장비별로 전달합니다.
 
 ## 7. 롤백
 
-최종 API가 시작되지 않거나 health check에 실패하면 최종 서비스를 먼저 중지하고 기존 테스트 API를 복구합니다.
+최종 API가 시작되지 않거나 health check에 실패하면 최종 서비스를 먼저 중지하고 백업한 환경파일과 systemd 설정을 복원한 뒤 기존 r3 서비스를 다시 시작합니다. v2.2.0에서 추가된 `alarms_last_seen_at` 필드는 이전 코드가 읽지 않으므로 남아 있어도 r3 동작에는 영향을 주지 않습니다.
 
 ```bash
 sudo systemctl stop hearo-mqtt-bridge-v2-final

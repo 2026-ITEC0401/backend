@@ -3,7 +3,7 @@
 - 문서 상태: 구현 완료·배포 전 최종 검증본
 - 최초 작성일: 2026-08-17
 - 구현 반영일: 2026-08-24
-- API 구현 버전: 2.1.2 (`/v2` 외부 경로 유지)
+- API 구현 버전: 2.2.0 (`/v2` 외부 경로 유지)
 - 프론트 필드 활용 사전: [10. API 필드별 프론트 활용 가이드](#10-api-필드별-프론트-활용-가이드)
 
 ## 1. 서비스 규칙
@@ -119,6 +119,8 @@ Authorization: Bearer {access_token}
 | LED 알림 설정 | `PATCH /households/{id}/devices/{device_id}/settings` | owner만 가능 |
 | 메인 최신 알림 | `GET /households/{id}/alarms/latest` | 가장 최근 알림 1건 |
 | 알림 날짜별 목록 | `GET /households/{id}/alarms/history` | 최근 7일 전체 |
+| 미확인 알림 배너 | `GET /households/{id}/alarms/unread-count` | 로그인 사용자 기준 최근 7일 미확인 개수 |
+| 알림 모두 확인 | `PATCH /households/{id}/alarms/seen` | 로그인 사용자의 확인 시각을 서버 현재 시각으로 갱신 |
 | 알림 상세 보기 | `GET /households/{id}/alarms/{alarm_id}` | 선택한 알림 1건 |
 | 보호자 연락처 | `GET/POST/PATCH/DELETE /households/{id}/contacts...` | 연락처 조회와 owner의 등록·수정·삭제 |
 | 실시간 상태·알림 | `WS /ws/households/{id}` | 기기 상태와 신규 알림 |
@@ -756,7 +758,49 @@ GET /households/{household_id}/alarms/history
 
 `알림 오류`와 `이상 없음` 피드백 저장 기능은 요구사항이 확정되지 않아 이번 명세에서 제외합니다. 버튼을 유지하려면 별도 피드백 API 합의가 필요합니다.
 
-### 7.4 특정 알림 상세 조회
+### 7.4 미확인 알림 개수
+
+```text
+GET /households/{household_id}/alarms/unread-count
+Authorization: Bearer {access_token}
+```
+
+- 해당 가구에 연동된 현재 로그인 사용자의 상태만 조회합니다.
+- `Asia/Seoul` 기준 오늘을 포함한 최근 7개 날짜 안에서 계산합니다.
+- `alarm.time > last_seen_at`인 알림만 미확인으로 계산합니다.
+- 미래 시각의 알림은 계산하지 않습니다.
+- owner와 member는 서로 독립된 `last_seen_at`을 사용합니다.
+- 개별 알림에 `read` 필드를 추가하지 않습니다.
+
+```json
+{
+  "unread_count": 3,
+  "last_seen_at": "2026-08-30T03:10:00Z",
+  "window_days": 7
+}
+```
+
+신규 owner는 가구 생성 시각, 신규 member는 가구 연동 시각을 최초 확인 시각으로 사용합니다. `alarms_last_seen_at`이 없는 기존 구성원은 운영 환경변수 `HEARO_ALARM_UNREAD_BASELINE_AT`의 고정 배포 시각으로 최초 값을 초기화합니다.
+
+### 7.5 알림 모두 확인
+
+```text
+PATCH /households/{household_id}/alarms/seen
+Authorization: Bearer {access_token}
+```
+
+요청 본문은 없습니다. 클라이언트 시각이나 사용자 ID를 받지 않고, 인증된 사용자의 확인 시각을 서버 UTC 현재 시각으로 갱신합니다. 같은 가구의 다른 사용자 확인 상태에는 영향을 주지 않습니다.
+
+```json
+{
+  "unread_count": 0,
+  "last_seen_at": "2026-08-30T03:15:20Z"
+}
+```
+
+프론트는 최근 7일 이력 조회가 성공한 뒤 이 API를 호출하고, 성공 응답을 받은 경우 배너 개수를 0으로 변경합니다. 이 요청의 서버 처리 시점까지 생성된 알림은 확인한 것으로 간주합니다.
+
+### 7.6 특정 알림 상세 조회
 
 ```text
 GET /households/{household_id}/alarms/{alarm_id}
@@ -1107,6 +1151,8 @@ WebSocket의 나머지 메시지와 모든 REST 필드의 활용 의도는 다�
 |---|---|
 | 일반 목록·최근 알림 | `id`, `time`, `location`, `source_device_id`, `sound`, `raw_label`, `type`, `confidence` |
 | 최근 7일 이력 | 일반 목록 필드 + `local_time` |
+| 미확인 개수 | 알림 객체 없이 `unread_count`, `last_seen_at`, `window_days` |
+| 모두 확인 | 알림 객체 없이 `unread_count`, `last_seen_at` |
 | 상세 조회 | `id`, `date`, `local_time`, `location`, `sound`, `raw_label`, `type` |
 | WebSocket `alarm.created` | `id`, `sound`, `raw_label`, `type`, `location`, `time` |
 
@@ -1124,6 +1170,11 @@ WebSocket의 나머지 메시지와 모든 REST 필드의 활용 의도는 다�
 | `days[].date` | 해당 그룹의 `YYYY-MM-DD` 날짜입니다. |
 | `days[].display_label` | 오늘은 `오늘`, 전날은 `어제`, 나머지 5개 날짜는 `null`입니다. `null`이면 프론트가 `days[].date`를 `8월 20일` 같은 문구로 변환합니다. |
 | `days[].alarms` | 해당 날짜의 최신순 알림 배열입니다. 비어 있어도 날짜 행을 유지합니다. |
+| 미확인 `unread_count` | 메인 상단의 `확인하지 않은 N개의 알람이 있어요`에서 N으로 표시합니다. |
+| 미확인 `last_seen_at` | 현재 로그인 사용자의 서버 저장 확인 기준입니다. 프론트가 임의로 변경하지 않습니다. |
+| 미확인 `window_days` | 계산 범위가 최근 7일임을 나타냅니다. 현재 값은 항상 `7`입니다. |
+| 모두 확인 `unread_count` | 성공 시 `0`이며 프론트 배너 값을 즉시 초기화합니다. |
+| 모두 확인 `last_seen_at` | 이 시각보다 뒤에 생성된 WebSocket 알림만 새 미확인 알림으로 다룹니다. |
 | 상세 `alarm` | 선택한 알림 한 건입니다. 목록보다 화면에 필요한 날짜·세부 레이블 중심의 필드만 포함합니다. |
 
 ### 10.7 보호자 연락처 API
@@ -1153,7 +1204,7 @@ WebSocket의 나머지 메시지와 모든 REST 필드의 활용 의도는 다�
 | `device.config_changed.type` | LED 등 기기 설정 변경 이벤트임을 판별합니다. |
 | `device.config_changed.device` | 10.5절의 전체 기기 상태 객체로 해당 카드를 교체합니다. |
 | `alarm.created.type` | 신규 알림 이벤트임을 판별합니다. |
-| `alarm.created.alarm` | 9절 예시의 알림 객체로 토스트·최신 알림·이력 목록에 즉시 추가합니다. |
+| `alarm.created.alarm` | 9절 예시의 알림 객체로 토스트·최신 알림·이력 목록에 즉시 추가하고, 같은 `alarm.id`를 아직 처리하지 않았다면 미확인 개수를 1 증가시킵니다. |
 | `household.inactivated.type` | owner 해제로 가구가 비활성화됐음을 뜻합니다. 가구 관련 캐시를 비우고 연동 안내 화면으로 이동합니다. |
 | `household.inactivated.household_id` | 비활성화된 가구가 현재 가구와 같은지 확인합니다. |
 | 프론트→서버 `ping.type` | 연결 유지와 단절 감지를 위해 60초보다 짧은 간격으로 `ping`을 보냅니다. |
@@ -1161,6 +1212,8 @@ WebSocket의 나머지 메시지와 모든 REST 필드의 활용 의도는 다�
 | `pong.time` | 서버 UTC 시각이며 연결 상태 진단에 사용할 수 있습니다. |
 
 알 수 없는 WebSocket `type`은 앱을 중단시키지 말고 무시하거나 진단 로그에만 남기는 방식으로 처리합니다.
+
+WebSocket 재연결, 로그인 계정 변경 또는 페이지 새로고침 시에는 로컬 숫자를 신뢰하지 않고 `GET .../alarms/unread-count`를 다시 호출합니다. `localStorage`는 화면 표시용 임시 캐시로만 사용할 수 있으며 서버 응답이 기준입니다.
 
 ### 10.9 프론트에서 직접 호출하지 않는 API
 
