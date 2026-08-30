@@ -41,7 +41,7 @@
 
 1. 현재 실행 중인 v1과 과거 v2를 백업합니다.
 2. 과거 이메일 기반 core 테이블과 분리된 최종 DynamoDB 테이블을 만듭니다.
-3. 최종 소스를 EC2 `/opt/hearo-backend-v2-r2`에 반영하고 테스트합니다.
+3. 최종 소스를 EC2 `/opt/hearo-backend-v2-r4`에 반영하고 테스트합니다.
 4. 8001 systemd 서비스를 새 코드로 재시작합니다.
 5. Nginx `/v2/` 경로에서 health와 OpenAPI를 확인합니다.
 6. MQTT bridge의 내부 API 주소를 8001로 바꾸고 알림 저장을 확인합니다.

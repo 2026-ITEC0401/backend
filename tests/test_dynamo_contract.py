@@ -23,6 +23,24 @@ class RecordingClient:
         self.transactions.append(TransactItems)
 
 
+class ConditionalCheckFailedException(Exception):
+    pass
+
+
+class RecordingCoreTable:
+    def __init__(self):
+        self.updates: list[dict] = []
+
+    def update_item(self, **kwargs):
+        self.updates.append(kwargs)
+        values = kwargs["ExpressionAttributeValues"]
+        value = values.get(":baseline", values.get(":seen"))
+        return {"Attributes": {"alarms_last_seen_at": value}}
+
+    def get_item(self, *, Key):
+        return {"Item": {**Key, "alarms_last_seen_at": "2026-08-30T01:00:00Z"}}
+
+
 def repository() -> DynamoRepository:
     value = DynamoRepository.__new__(DynamoRepository)
     value.settings = SimpleNamespace(
@@ -95,7 +113,73 @@ def test_create_owner_transaction_contains_all_final_identity_and_device_records
     assert len([key for key in keys if key[0].startswith("DEVICECRED#")]) == 4
     household_item = next(item for item in items if item["sk"] == "META")
     assert household_item["emergency_address"]["postal_code"] == "41566"
+    owner_membership = next(item for item in items if item["sk"] == "MEMBER#owner-1")
+    assert owner_membership["alarms_last_seen_at"] == user.created_at
     assert "email" not in str(items).casefold()
+
+
+def test_dynamo_alarm_seen_updates_are_membership_scoped_and_monotonic():
+    repo = DynamoRepository.__new__(DynamoRepository)
+    repo.core = RecordingCoreTable()
+    repo.client = SimpleNamespace(
+        exceptions=SimpleNamespace(
+            ConditionalCheckFailedException=ConditionalCheckFailedException
+        )
+    )
+
+    baseline = repo.get_or_initialize_alarm_last_seen(
+        "home-1",
+        "owner-1",
+        "2026-08-30T00:00:00Z",
+    )
+    assert baseline == "2026-08-30T00:00:00Z"
+    initialize = repo.core.updates[0]
+    assert initialize["Key"] == {
+        "pk": "HOUSE#home-1",
+        "sk": "MEMBER#owner-1",
+    }
+    assert "if_not_exists" in initialize["UpdateExpression"]
+    assert initialize["ConditionExpression"] == "attribute_exists(pk)"
+
+    seen = repo.mark_alarms_seen(
+        "home-1",
+        "owner-1",
+        "2026-08-30T02:00:00Z",
+    )
+    assert seen == "2026-08-30T02:00:00Z"
+    update = repo.core.updates[1]
+    assert update["Key"] == initialize["Key"]
+    assert "alarms_last_seen_at <= :seen" in update["ConditionExpression"]
+
+
+def test_link_member_transaction_initializes_alarm_seen_at_to_link_time():
+    repo = repository()
+    user = User(
+        user_id="member-1",
+        login_id="member01",
+        name="가족",
+        phone_number="+821087654321",
+        password_hash="hash",
+        account_type="family_member",
+    )
+    linked_at = datetime(2026, 8, 30, 3, 0, tzinfo=UTC)
+    repo.get_user = lambda user_id: user
+    repo.get_invite = lambda invite_hash: {
+        "household_id": "home-1",
+        "expires_at": "2026-08-31T00:00:00Z",
+    }
+
+    repo.link_member(user.user_id, "invite-hash", linked_at)
+
+    operations = repo.client.transactions[0]
+    membership = next(
+        decoded_item(operation)
+        for operation in operations
+        if operation.get("Put")
+        and operation["Put"]["Item"].get("sk") == {"S": "MEMBER#member-1"}
+    )
+    assert membership["linked_at"] == "2026-08-30T03:00:00Z"
+    assert membership["alarms_last_seen_at"] == membership["linked_at"]
 
 
 def test_owner_unlink_transaction_removes_address_invite_and_all_members():
