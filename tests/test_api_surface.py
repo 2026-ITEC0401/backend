@@ -16,6 +16,7 @@ def test_openapi_matches_the_final_frontend_contract(api):
         ("/auth/refresh", "post"),
         ("/auth/logout", "post"),
         ("/me", "get"),
+        ("/me", "delete"),
         ("/me/password", "patch"),
         ("/households/current", "get"),
         ("/households/current/link", "delete"),

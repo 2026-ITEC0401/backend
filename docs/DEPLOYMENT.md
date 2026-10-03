@@ -1,6 +1,6 @@
 # Hearo 백엔드 v2 배포 및 롤백
 
-이 문서는 현재 검증한 EC2 병렬 배포 구조에 v2.2.0 변경을 반영하는 절차를 기준으로 합니다.
+이 문서는 현재 검증한 EC2 병렬 배포 구조에 v2.3.0 변경을 반영하는 절차를 기준으로 합니다.
 
 ```text
 Nginx HTTPS /v2/
@@ -26,10 +26,10 @@ FastAPI 내부 MQTT 수집 API
 
 ## 2. 코드와 의존성
 
-v2.2.0 신규 릴리스 디렉터리는 `/opt/hearo-backend-v2-r4`를 사용합니다. 운영 전환 전까지 현재 r3 디렉터리를 유지합니다.
+v2.3.0 신규 릴리스 디렉터리는 `/opt/hearo-backend-v2-r5`를 사용합니다. 운영 전환 전까지 현재 v2.2.0 r4 디렉터리를 유지합니다.
 
 ```bash
-cd /opt/hearo-backend-v2-r4
+cd /opt/hearo-backend-v2-r5
 python3 -m venv .venv
 .venv/bin/python -m pip install --upgrade pip
 .venv/bin/python -m pip install -r requirements.txt
@@ -43,7 +43,7 @@ python3 -m venv .venv
 ```
 
 ```text
-Hearo API 2.2.0
+Hearo API 2.3.0
 ```
 
 ## 3. DynamoDB
@@ -54,7 +54,7 @@ Hearo API 2.2.0
 - `hearo-alerts-v2-final`: 가구별 알림과 `alarm-lookup-index`
 - EC2 애플리케이션 역할의 최소 DynamoDB 권한
 
-운영 역할에는 트랜잭션을 위한 `dynamodb:TransactWriteItems`와 `dynamodb:ConditionCheckItem`이 모두 필요합니다.
+운영 역할에는 트랜잭션을 위한 `dynamodb:TransactWriteItems`와 `dynamodb:ConditionCheckItem`이 모두 필요합니다. v2.3.0 회원 탈퇴는 해당 사용자의 만료 전 refresh token과 개인 표시 이름 키만 찾기 위해 core 테이블의 `dynamodb:Scan`도 사용합니다. 쓰기는 기존 `DeleteItem` 권한만 사용합니다.
 
 ## 4. 환경변수
 
@@ -122,12 +122,14 @@ sudo systemctl enable --now hearo-mqtt-bridge-v2-final
 10. 기존 owner의 첫 `GET .../alarms/unread-count`가 배포 이전 알림을 0건으로 처리합니다.
 11. 배포 후 새 알림을 생성하면 owner와 member의 미확인 개수가 각각 증가합니다.
 12. owner가 `PATCH .../alarms/seen`을 호출하면 owner만 0이 되고 member 개수는 유지됩니다.
+13. ESP32 설정 응답의 `led_alert_control_supported`는 `true`, Raspberry Pi는 `false`이고 Pi LED 변경 요청은 `409 DEVICE_LED_CONTROL_UNSUPPORTED`입니다.
+14. 별도로 만든 삭제 전용 테스트 계정에서만 `DELETE /me`를 실행하여 `204`와 재로그인 `401`을 확인합니다. 실제 운영 계정으로 smoke test하지 않습니다.
 
 회원가입 응답의 device credential은 한 번만 원문으로 반환되므로 안전하게 장비별로 전달합니다.
 
 ## 7. 롤백
 
-최종 API가 시작되지 않거나 health check에 실패하면 최종 서비스를 먼저 중지하고 백업한 환경파일과 systemd 설정을 복원한 뒤 기존 r3 서비스를 다시 시작합니다. v2.2.0에서 추가된 `alarms_last_seen_at` 필드는 이전 코드가 읽지 않으므로 남아 있어도 r3 동작에는 영향을 주지 않습니다.
+최종 API가 시작되지 않거나 health check에 실패하면 최종 서비스를 먼저 중지하고 백업한 환경파일과 systemd 설정을 복원한 뒤 기존 r4 코드를 다시 시작합니다. v2.3.0은 새 DynamoDB 필드를 추가하지 않으므로 API 코드·systemd 작업 경로와 IAM 정책을 이전 상태로 복원하면 됩니다.
 
 ```bash
 sudo systemctl stop hearo-mqtt-bridge-v2-final

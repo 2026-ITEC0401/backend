@@ -264,6 +264,110 @@ def test_member_unlink_keeps_account_and_owner_unlink_deactivates_household(api)
     assert device_blocked.status_code == 403
 
 
+def test_unlinked_user_can_delete_account_after_password_confirmation(api):
+    family = create_family(api)
+    headers = auth_header(family)
+    user_id = family["user"]["user_id"]
+
+    wrong_password = api.client.request(
+        "DELETE",
+        "/me",
+        headers=headers,
+        json={"current_password": "WrongPassword123"},
+    )
+    assert wrong_password.status_code == 409
+    assert wrong_password.json()["code"] == "CURRENT_PASSWORD_MISMATCH"
+    assert api.repository.get_user(user_id) is not None
+
+    deleted = api.client.request(
+        "DELETE",
+        "/me",
+        headers=headers,
+        json={"current_password": "MemberPassword123"},
+    )
+    assert deleted.status_code == 204
+    assert api.repository.get_user(user_id) is None
+    assert api.client.get("/me", headers=headers).status_code == 401
+    assert api.client.post(
+        "/auth/refresh",
+        json={"refresh_token": family["tokens"]["refresh_token"]},
+    ).status_code == 401
+    assert api.client.post(
+        "/auth/login",
+        json={"login_id": "family01", "password": "MemberPassword123"},
+    ).status_code == 401
+
+    replacement = create_family(api)
+    assert replacement["user"]["login_id"] == "family01"
+
+
+def test_linked_member_account_deletion_keeps_household_and_removes_user_data(api):
+    owner = create_owner(api)
+    family = create_family(api)
+    _, linked = link_family(api, owner, family)
+    household_id = linked["household_id"]
+    member_id = family["user"]["user_id"]
+
+    display_name = api.client.patch(
+        f"/households/{household_id}/members/{member_id}/display-name",
+        headers=auth_header(owner),
+        json={"display_name": "삭제할 별명"},
+    )
+    assert display_name.status_code == 200
+
+    deleted = api.client.request(
+        "DELETE",
+        "/me",
+        headers=auth_header(family),
+        json={"current_password": "MemberPassword123"},
+    )
+    assert deleted.status_code == 204
+    assert api.repository.get_user(member_id) is None
+    assert member_id not in api.repository.members[household_id]
+    assert api.repository.get_household(household_id).status == "active"
+    assert all(
+        member_id not in (viewer_id, target_id)
+        for _, viewer_id, target_id in api.repository.display_names
+    )
+    assert all(
+        token["user_id"] != member_id
+        for token in api.repository.refresh_tokens.values()
+    )
+
+
+def test_owner_account_deletion_deactivates_household_and_preserves_member_account(api):
+    owner = create_owner(api)
+    family = create_family(api)
+    _, linked = link_family(api, owner, family)
+    household_id = linked["household_id"]
+    owner_id = owner["user"]["user_id"]
+    member_id = family["user"]["user_id"]
+
+    deleted = api.client.request(
+        "DELETE",
+        "/me",
+        headers=auth_header(owner),
+        json={"current_password": "StrongPassword123"},
+    )
+    assert deleted.status_code == 204
+    assert api.repository.get_user(owner_id) is None
+    assert api.repository.get_household(household_id).status == "inactive"
+    assert api.repository.get_household(household_id).emergency_address is None
+
+    member = api.repository.get_user(member_id)
+    assert member is not None
+    assert member.household_link_status == "unlinked"
+    assert member.household_id is None
+    assert api.client.get("/me", headers=auth_header(owner)).status_code == 401
+    assert api.client.get("/me", headers=auth_header(family)).status_code == 200
+
+    blocked_device = api.client.get(
+        "/device/v1/config",
+        headers={"X-Device-Credential": owner["device_credentials"]["esp32_1"]},
+    )
+    assert blocked_device.status_code == 403
+
+
 def test_refresh_rotation_logout_and_logged_in_password_change(api):
     owner = create_owner(api)
     original_refresh = owner["tokens"]["refresh_token"]

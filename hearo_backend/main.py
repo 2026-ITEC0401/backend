@@ -21,6 +21,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
+from . import __version__
 from .config import Settings
 from .domain import Alert, EmergencyAddress, Household, User, iso_utc, parse_timestamp
 from .history import SEOUL
@@ -28,6 +29,7 @@ from .integrations import create_mqtt_publisher
 from .juso import JusoClient, JusoError
 from .realtime import ConnectionManager
 from .schemas import (
+    AccountDeletionRequest,
     ConnectionRequest,
     ContactRequest,
     DeviceSettingsRequest,
@@ -49,6 +51,7 @@ from .security import SlidingWindowLimiter, TokenError, TokenManager, hash_secre
 from .services import (
     change_password,
     current_invite,
+    delete_account,
     device_status,
     link_household,
     login,
@@ -102,7 +105,7 @@ def create_app(
 ) -> FastAPI:
     app_settings = settings or Settings()
     app_settings.validate_for_production()
-    app = FastAPI(title="Hearo API", version="2.2.0")
+    app = FastAPI(title="Hearo API", version=__version__)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=app_settings.cors_origins,
@@ -271,7 +274,7 @@ def create_app(
 
     @app.get("/health")
     def health() -> dict[str, str]:
-        return {"status": "ok", "version": "2.2.0"}
+        return {"status": "ok", "version": __version__}
 
     @app.post("/auth/signup", status_code=status.HTTP_201_CREATED)
     def auth_signup(payload: SignupRequest):
@@ -345,6 +348,31 @@ def create_app(
             payload.current_password,
             payload.new_password,
         )
+        return None
+
+    @app.delete("/me", status_code=status.HTTP_204_NO_CONTENT)
+    async def delete_my_account(
+        payload: AccountDeletionRequest,
+        user: Annotated[User, Depends(current_user)],
+    ):
+        result = delete_account(
+            app.state.repository,
+            user,
+            payload.current_password,
+        )
+        household_id = result["previous_household_id"]
+        if household_id and result["household_status"] == "inactive":
+            await app.state.realtime.broadcast(
+                household_id,
+                {"type": "household.inactivated", "household_id": household_id},
+            )
+            await app.state.realtime.close_household(household_id, code=1008)
+        elif household_id:
+            await app.state.realtime.broadcast(
+                household_id,
+                {"type": "household.member_removed", "user_id": user.user_id},
+            )
+            await app.state.realtime.close_user(user.user_id, code=1008)
         return None
 
     @app.get("/households/current")
@@ -962,7 +990,7 @@ def create_app(
                 or household.status != "active"
             ):
                 raise TokenError("이 WebSocket에 접근할 수 없습니다.")
-            await app.state.realtime.add(household_id, websocket)
+            await app.state.realtime.add(household_id, user.user_id, websocket)
             authenticated = True
             snapshot = [
                 device_status(item, app.state.settings)
@@ -979,7 +1007,11 @@ def create_app(
             pass
         finally:
             if authenticated:
-                await app.state.realtime.remove(household_id, websocket)
+                await app.state.realtime.remove(
+                    household_id,
+                    user.user_id,
+                    websocket,
+                )
 
     return app
 

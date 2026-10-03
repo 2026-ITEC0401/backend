@@ -180,6 +180,35 @@ def change_password(repository, user: User, current_password: str, new_password:
     repository.update_user_password(user.user_id, hash_password(new_password))
 
 
+def delete_account(
+    repository,
+    user: User,
+    current_password: str,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    if not verify_password(current_password, user.password_hash):
+        raise ConflictError(
+            "현재 비밀번호가 올바르지 않습니다.",
+            code="CURRENT_PASSWORD_MISMATCH",
+            field_errors={"current_password": "현재 비밀번호를 다시 확인해 주세요."},
+        )
+
+    previous_household_id = user.household_id
+    household_status: str | None = None
+    if user.household_link_status == "linked" and previous_household_id:
+        unlink_result = repository.unlink_user(
+            user.user_id,
+            now or datetime.now(UTC),
+        )
+        household_status = unlink_result["household_status"]
+
+    repository.delete_user_account(user.user_id)
+    return {
+        "previous_household_id": previous_household_id,
+        "household_status": household_status,
+    }
+
+
 def current_invite(repository, settings: Settings, household: Household) -> dict[str, str]:
     if not household.invite_nonce or not household.invite_expires_at or not household.invite_hash:
         raise NotFoundError("초대 코드가 등록되지 않았습니다.", code="INVITE_CODE_NOT_FOUND")

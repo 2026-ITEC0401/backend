@@ -187,8 +187,8 @@ def test_led_only_settings_and_timeout_status(api):
     owner = create_owner(api)
     household_id = owner["user"]["household_id"]
     headers = auth_header(owner)
-    rpi_credential = owner["device_credentials"]["rpi-001"]
-    device_headers = {"X-Device-Credential": rpi_credential}
+    esp32_credential = owner["device_credentials"]["esp32_1"]
+    device_headers = {"X-Device-Credential": esp32_credential}
 
     api.client.post(
         "/device/v1/heartbeat",
@@ -196,16 +196,18 @@ def test_led_only_settings_and_timeout_status(api):
         json={"mqtt_connected": True, "config_version": 1},
     )
     changed = api.client.patch(
-        f"/households/{household_id}/devices/rpi-001/settings",
+        f"/households/{household_id}/devices/esp32_1/settings",
         headers=headers,
         json={"led_alert_enabled": False},
     )
     assert changed.status_code == 200
     assert changed.json()["ui_status"] == "pending"
-    assert "capabilities" not in changed.json()
+    assert changed.json()["device_type"] == "alert_node"
+    assert changed.json()["led_alert_control_supported"] is True
     assert "sensitivity" not in changed.json()
     command = api.mqtt.published[-1][1]
     assert command["type"] == "device.config.set"
+    assert command["led_alert_enabled"] is False
     assert "sensitivity" not in command
 
     config = api.client.get("/device/v1/config", headers=device_headers).json()
@@ -220,14 +222,30 @@ def test_led_only_settings_and_timeout_status(api):
     values = api.client.get(
         f"/households/{household_id}/devices", headers=headers
     ).json()["devices"]
-    assert next(item for item in values if item["device_id"] == "rpi-001")["ui_status"] == "connected"
+    assert next(item for item in values if item["device_id"] == "esp32_1")["ui_status"] == "connected"
+    assert {
+        item["device_id"]
+        for item in values
+        if item["led_alert_control_supported"]
+    } == {"esp32_1", "esp32_2", "esp32_3"}
 
-    unsupported = api.client.patch(
+    rpi = next(item for item in values if item["device_id"] == "rpi-001")
+    assert rpi["device_type"] == "hub"
+    assert rpi["led_alert_control_supported"] is False
+    unsupported_rpi = api.client.patch(
+        f"/households/{household_id}/devices/rpi-001/settings",
+        headers=headers,
+        json={"led_alert_enabled": False},
+    )
+    assert unsupported_rpi.status_code == 409
+    assert unsupported_rpi.json()["code"] == "DEVICE_LED_CONTROL_UNSUPPORTED"
+
+    unsupported_field = api.client.patch(
         f"/households/{household_id}/devices/esp32_1/settings",
         headers=headers,
         json={"led_alert_enabled": True, "sensitivity": "low"},
     )
-    assert unsupported.status_code == 422
+    assert unsupported_field.status_code == 422
 
     now = datetime(2026, 8, 13, 12, 0, tzinfo=UTC)
     stale_command = Device(
