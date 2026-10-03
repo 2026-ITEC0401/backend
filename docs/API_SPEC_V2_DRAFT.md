@@ -2,8 +2,8 @@
 
 - 문서 상태: 구현 완료·배포 전 최종 검증본
 - 최초 작성일: 2026-08-17
-- 구현 반영일: 2026-08-24
-- API 구현 버전: 2.2.0 (`/v2` 외부 경로 유지)
+- 구현 반영일: 2026-10-03
+- API 구현 버전: 2.3.0 (`/v2` 외부 경로 유지)
 - 프론트 필드 활용 사전: [10. API 필드별 프론트 활용 가이드](#10-api-필드별-프론트-활용-가이드)
 
 ## 1. 서비스 규칙
@@ -18,7 +18,8 @@
 - 개인 표시 이름 설정은 owner 전용 기능이 아닙니다. 가구에 연동된 사용자라면 자신이 보는 각 구성원의 표시 이름을 설정·초기화할 수 있습니다.
 - 가족 연동 해제는 다른 구성원을 가구에서 내보내는 기능이 아니라, 현재 로그인한 계정이 자신의 가구 연결을 끊는 기능입니다. owner가 다른 계정의 연결을 대신 해제할 수 없습니다.
 - 일반 member가 연동을 해제하면 해당 member의 연결만 끊고 가구는 유지합니다. 가구 owner가 자신의 연동을 해제하면 소유권을 이전하지 않고 가구 전체를 비활성화합니다.
-- 기기 설정은 MQTT 연결 ON/OFF와 LED 알림 ON/OFF만 제공합니다.
+- 기기 설정은 MQTT 연결 ON/OFF와 ESP32 3대의 LED 알림 ON/OFF만 제공합니다. Raspberry Pi에는 LED 설정을 제공하지 않습니다.
+- 회원 탈퇴는 현재 비밀번호를 재확인한 뒤 로그인 ID·전화번호·프로필·refresh token·개인 표시 이름을 삭제합니다.
 - 진동 알림과 민감도 조절은 화면과 API에서 제거합니다.
 - 알림 이력은 한국시간 기준 오늘을 포함한 최근 7개 달력 날짜를 반환합니다.
 - 녹음 파일을 생성·업로드·보관·재생하지 않습니다.
@@ -109,6 +110,7 @@ Authorization: Bearer {access_token}
 | 가족 표시 이름 변경 | `PATCH /households/{id}/members/{member_user_id}/display-name` | 호출자 화면에만 적용되는 별칭 |
 | 가족 표시 이름 초기화 | `DELETE /households/{id}/members/{member_user_id}/display-name` | 가입 시 이름으로 복원 |
 | 비밀번호 변경 | `PATCH /me/password` | 기존 비밀번호 확인 |
+| 회원 탈퇴 | `DELETE /me` | 현재 비밀번호 재확인 후 계정 삭제 |
 | owner 가족 설정 | `GET /households/{id}/invite-code` | 현재 공유 코드 표시 |
 | 초대 코드 재발급 | `POST /households/{id}/invite-code/rotate` | 기존 코드 즉시 폐기 |
 | 미연동 가족 설정 | `POST /households/link/preview`, `POST /households/link` | 가입 이후에도 연동 가능 |
@@ -116,7 +118,7 @@ Authorization: Bearer {access_token}
 | 내 계정의 가구 연동 해제 | `DELETE /households/current/link` | member는 본인 연결 해제, owner는 가구 비활성화 |
 | 메인 기기 목록 | `GET /households/{id}/devices` | 고정 4개 기기와 상태 표시 |
 | 기기 연결 설정 | `PATCH /households/{id}/devices/{device_id}/connection` | owner만 가능 |
-| LED 알림 설정 | `PATCH /households/{id}/devices/{device_id}/settings` | owner만 가능 |
+| LED 알림 설정 | `PATCH /households/{id}/devices/{device_id}/settings` | owner만 가능, ESP32 3대만 지원 |
 | 메인 최신 알림 | `GET /households/{id}/alarms/latest` | 가장 최근 알림 1건 |
 | 알림 날짜별 목록 | `GET /households/{id}/alarms/history` | 최근 7일 전체 |
 | 미확인 알림 배너 | `GET /households/{id}/alarms/unread-count` | 로그인 사용자 기준 최근 7일 미확인 개수 |
@@ -243,6 +245,26 @@ PATCH /me/password
 
 변경 성공 시 기존 access·refresh token을 모두 무효화하고 재로그인을 요구합니다.
 로그인하지 못한 사용자의 비밀번호 찾기는 SMS 인증 수단이 확정되기 전까지 이번 명세에서 제외합니다.
+
+### 4.6 회원 탈퇴
+
+```text
+DELETE /me
+```
+
+```json
+{
+  "current_password": "StrongPassword123"
+}
+```
+
+- access token 인증과 현재 비밀번호 재확인이 모두 필요합니다.
+- 성공 응답은 본문 없는 `204 No Content`입니다.
+- 로그인 ID, 휴대폰 alias, 사용자 프로필, refresh token과 해당 사용자가 만든·대상인 개인 표시 이름을 삭제합니다.
+- 일반 member는 본인 멤버십만 제거하며 가구는 유지합니다.
+- owner는 기존 owner 연동 해제 정책과 동일하게 가구를 비활성화하고 긴급 주소를 삭제합니다. 다른 구성원의 계정은 삭제하지 않고 미연동 상태로 전환합니다.
+- 성공 직후 기존 access·refresh token 및 로그인 정보는 사용할 수 없습니다.
+- 비밀번호가 틀리면 `409 CURRENT_PASSWORD_MISMATCH`를 반환하며 아무 데이터도 변경하지 않습니다.
 
 ## 5. 가구·가족 연동 API
 
@@ -611,6 +633,8 @@ GET /households/{household_id}/devices
     {
       "device_id": "esp32_2",
       "location": "현관",
+      "device_type": "alert_node",
+      "led_alert_control_supported": true,
       "desired_mqtt_connected": true,
       "reported_mqtt_connected": true,
       "network_status": "online",
@@ -664,7 +688,11 @@ PATCH /households/{household_id}/devices/{device_id}/settings
 }
 ```
 
-진동과 민감도 필드는 요청·응답에 포함하지 않습니다.
+- owner만 변경할 수 있습니다.
+- `esp32_1`, `esp32_2`, `esp32_3`에서만 지원합니다.
+- Raspberry Pi(`rpi-001`) 요청은 `409 DEVICE_LED_CONTROL_UNSUPPORTED`를 반환합니다.
+- 프론트는 `led_alert_control_supported=true`인 기기에만 LED 스위치를 표시합니다.
+- 진동과 민감도 필드는 요청·응답에 포함하지 않습니다.
 
 ## 7. 알림 API
 
@@ -1114,6 +1142,8 @@ WebSocket의 나머지 메시지와 모든 REST 필드의 활용 의도는 다�
 | `devices` | 고정 4개 기기 카드 배열입니다. |
 | `device_id` | 카드 key와 연결·설정 API 경로에 사용합니다. |
 | `location` | `거실`, `안방`, `현관`, `화장실`처럼 사용자에게 기기 위치를 표시합니다. |
+| `device_type` | `hub`는 Raspberry Pi, `alert_node`는 ESP32 알림 노드입니다. |
+| `led_alert_control_supported` | `true`인 ESP32 카드에만 LED 알림 스위치를 표시합니다. |
 | `desired_mqtt_connected` | owner가 마지막으로 요청한 MQTT 연결 상태입니다. 스위치 목표값으로 사용합니다. |
 | `reported_mqtt_connected` | 기기가 실제로 보고한 MQTT 연결 상태입니다. 목표값과 다르면 아직 반영 중일 수 있습니다. |
 | `network_status` | `online` 또는 `offline` 네트워크 상태 표시에 사용합니다. |
@@ -1207,6 +1237,8 @@ WebSocket의 나머지 메시지와 모든 REST 필드의 활용 의도는 다�
 | `alarm.created.alarm` | 9절 예시의 알림 객체로 토스트·최신 알림·이력 목록에 즉시 추가하고, 같은 `alarm.id`를 아직 처리하지 않았다면 미확인 개수를 1 증가시킵니다. |
 | `household.inactivated.type` | owner 해제로 가구가 비활성화됐음을 뜻합니다. 가구 관련 캐시를 비우고 연동 안내 화면으로 이동합니다. |
 | `household.inactivated.household_id` | 비활성화된 가구가 현재 가구와 같은지 확인합니다. |
+| `household.member_removed.type` | member 탈퇴로 구성원이 제거됐음을 뜻합니다. 가족 목록을 다시 조회합니다. |
+| `household.member_removed.user_id` | 목록에서 제거되거나 재조회될 사용자 ID입니다. |
 | 프론트→서버 `ping.type` | 연결 유지와 단절 감지를 위해 60초보다 짧은 간격으로 `ping`을 보냅니다. |
 | 서버→프론트 `pong.type` | 연결이 살아 있음을 확인합니다. |
 | `pong.time` | 서버 UTC 시각이며 연결 상태 진단에 사용할 수 있습니다. |
@@ -1237,6 +1269,8 @@ WebSocket 재연결, 로그인 계정 변경 또는 페이지 새로고침 시�
 
 - 모든 회원가입 화면에 별도 로그인 아이디 입력칸을 추가합니다.
 - 기기 상세에서 진동 알림과 민감도 조절을 삭제합니다.
+- LED 알림 스위치는 `led_alert_control_supported=true`인 ESP32 3대에만 표시합니다.
+- 회원 탈퇴 확인 화면에서 현재 비밀번호를 입력받아 `DELETE /me`를 호출하고, 성공 시 모든 로컬 token·가구 캐시를 삭제한 뒤 로그인 화면으로 이동합니다.
 - 알림 상세에서 녹음 재생 UI를 삭제합니다.
 - 구성원 이름 편집은 사용자별 표시 이름 변경으로 연결하며, 실제 회원 이름을 바꾸지 않습니다.
 - 가구 연동 해제 화면은 member에게는 본인 연결만 해제된다고 안내하고, owner에게는 가구 전체가 비활성화된다는 별도 확인 안내를 표시합니다.

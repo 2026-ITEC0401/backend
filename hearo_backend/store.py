@@ -132,6 +132,39 @@ class MemoryRepository:
             user.token_version += 1
             return user
 
+    def delete_user_account(self, user_id: str) -> None:
+        with self._lock:
+            user = self.users.get(user_id)
+            if not user:
+                raise NotFoundError("사용자를 찾을 수 없습니다.")
+            if user.household_link_status == "linked":
+                raise ConflictError(
+                    "가구 연결을 먼저 해제해야 합니다.",
+                    code="ACCOUNT_STILL_LINKED",
+                )
+
+            if self.users_by_login_id.get(user.login_id) == user_id:
+                self.users_by_login_id.pop(user.login_id, None)
+            if self.users_by_phone.get(user.phone_number) == user_id:
+                self.users_by_phone.pop(user.phone_number, None)
+
+            self.refresh_tokens = {
+                token_hash: value
+                for token_hash, value in self.refresh_tokens.items()
+                if value["user_id"] != user_id
+            }
+            self.display_names = {
+                key: value
+                for key, value in self.display_names.items()
+                if key[1] != user_id and key[2] != user_id
+            }
+            self.alarm_last_seen = {
+                key: value
+                for key, value in self.alarm_last_seen.items()
+                if key[1] != user_id
+            }
+            self.users.pop(user_id, None)
+
     def get_household(self, household_id: str) -> Household | None:
         return self.households.get(household_id)
 
@@ -346,6 +379,11 @@ class MemoryRepository:
             device = self.get_device(household_id, device_id)
             if not device:
                 raise NotFoundError("기기를 찾을 수 없습니다.")
+            if device.device_type != "alert_node":
+                raise ConflictError(
+                    "LED 알림 설정은 ESP32 알림 노드에서만 변경할 수 있습니다.",
+                    code="DEVICE_LED_CONTROL_UNSUPPORTED",
+                )
             if led_alert_enabled is not None:
                 device.led_alert_enabled = led_alert_enabled
             device.config_version += 1
@@ -665,6 +703,82 @@ class DynamoRepository:
             ReturnValues="ALL_NEW",
         )
         return self._user(result["Attributes"])
+
+    def delete_user_account(self, user_id: str) -> None:
+        from boto3.dynamodb.conditions import Attr
+
+        user = self.get_user(user_id)
+        if not user:
+            raise NotFoundError("사용자를 찾을 수 없습니다.")
+        if user.household_link_status == "linked":
+            raise ConflictError(
+                "가구 연결을 먼저 해제해야 합니다.",
+                code="ACCOUNT_STILL_LINKED",
+            )
+
+        reference_filter = (
+            (Attr("pk").begins_with("TOKEN#") & Attr("user_id").eq(user_id))
+            | Attr("viewer_user_id").eq(user_id)
+            | Attr("member_user_id").eq(user_id)
+        )
+        scan_arguments: dict[str, Any] = {
+            "FilterExpression": reference_filter,
+            "ProjectionExpression": "pk, sk",
+        }
+        reference_keys: list[dict[str, str]] = []
+        while True:
+            response = self.core.scan(**scan_arguments)
+            reference_keys.extend(
+                {"pk": item["pk"], "sk": item["sk"]}
+                for item in response.get("Items", [])
+            )
+            last_key = response.get("LastEvaluatedKey")
+            if not last_key:
+                break
+            scan_arguments["ExclusiveStartKey"] = last_key
+
+        try:
+            for key in reference_keys:
+                self.core.delete_item(Key=key)
+
+            self.client.transact_write_items(
+                TransactItems=[
+                    {
+                        "Delete": {
+                            "TableName": self.settings.core_table,
+                            "Key": self._ddb(
+                                {"pk": f"LOGINID#{user.login_id}", "sk": "USER"}
+                            ),
+                            "ConditionExpression": "user_id=:user",
+                            "ExpressionAttributeValues": self._ddb({":user": user_id}),
+                        }
+                    },
+                    {
+                        "Delete": {
+                            "TableName": self.settings.core_table,
+                            "Key": self._ddb(
+                                {"pk": f"PHONE#{user.phone_number}", "sk": "USER"}
+                            ),
+                            "ConditionExpression": "user_id=:user",
+                            "ExpressionAttributeValues": self._ddb({":user": user_id}),
+                        }
+                    },
+                    {
+                        "Delete": {
+                            "TableName": self.settings.core_table,
+                            "Key": self._ddb(
+                                {"pk": f"USER#{user_id}", "sk": "PROFILE"}
+                            ),
+                            "ConditionExpression": "attribute_exists(pk)",
+                        }
+                    },
+                ]
+            )
+        except Exception as exc:
+            raise ConflictError(
+                "계정 상태가 변경되어 삭제를 완료하지 못했습니다.",
+                code="ACCOUNT_DELETION_CONFLICT",
+            ) from exc
 
     def get_household(self, household_id: str) -> Household | None:
         item = self.core.get_item(Key={"pk": f"HOUSE#{household_id}", "sk": "META"}).get("Item")
@@ -1171,6 +1285,14 @@ class DynamoRepository:
         device_id: str,
         led_alert_enabled: bool | None,
     ) -> Device:
+        device = self.get_device(household_id, device_id)
+        if not device:
+            raise NotFoundError("기기를 찾을 수 없습니다.")
+        if device.device_type != "alert_node":
+            raise ConflictError(
+                "LED 알림 설정은 ESP32 알림 노드에서만 변경할 수 있습니다.",
+                code="DEVICE_LED_CONTROL_UNSUPPORTED",
+            )
         sets = ["desired_updated_at=:now"]
         values: dict[str, Any] = {":now": iso_utc(), ":one": 1}
         if led_alert_enabled is not None:

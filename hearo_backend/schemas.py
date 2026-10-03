@@ -189,6 +189,10 @@ class PasswordChangeRequest(StrictModel):
         return _validate_password_complexity(value)
 
 
+class AccountDeletionRequest(StrictModel):
+    current_password: str = Field(min_length=1, max_length=256)
+
+
 class InviteCodeRequest(StrictModel):
     invite_code: str = Field(pattern=INVITE_CODE_PATTERN)
 

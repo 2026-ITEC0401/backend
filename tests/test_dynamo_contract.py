@@ -41,6 +41,30 @@ class RecordingCoreTable:
         return {"Item": {**Key, "alarms_last_seen_at": "2026-08-30T01:00:00Z"}}
 
 
+class AccountDeletionTable:
+    def __init__(self, user: User):
+        self.user = user
+        self.deleted_keys: list[dict] = []
+        self.scan_calls = 0
+
+    def get_item(self, *, Key):
+        if Key == {"pk": f"USER#{self.user.user_id}", "sk": "PROFILE"}:
+            return {"Item": asdict(self.user)}
+        return {}
+
+    def scan(self, **_):
+        self.scan_calls += 1
+        return {
+            "Items": [
+                {"pk": "TOKEN#refresh-hash", "sk": "REFRESH"},
+                {"pk": "HOUSE#home-old", "sk": "ALIAS#member-1#owner-1"},
+            ]
+        }
+
+    def delete_item(self, *, Key):
+        self.deleted_keys.append(Key)
+
+
 def repository() -> DynamoRepository:
     value = DynamoRepository.__new__(DynamoRepository)
     value.settings = SimpleNamespace(
@@ -52,6 +76,12 @@ def repository() -> DynamoRepository:
 
 def decoded_item(operation: dict) -> dict:
     raw = operation["Put"]["Item"]
+    deserializer = TypeDeserializer()
+    return {key: deserializer.deserialize(value) for key, value in raw.items()}
+
+
+def decoded_key(operation: dict) -> dict:
+    raw = operation["Delete"]["Key"]
     deserializer = TypeDeserializer()
     return {key: deserializer.deserialize(value) for key, value in raw.items()}
 
@@ -241,6 +271,34 @@ def test_owner_unlink_transaction_removes_address_invite_and_all_members():
         if operation.get("Delete", {}).get("Key", {}).get("sk", {}).get("S", "").startswith("MEMBER#")
     ]
     assert len(member_deletes) == 2
+
+
+def test_delete_user_account_removes_identity_aliases_profile_and_user_references():
+    repo = repository()
+    user = User(
+        user_id="member-1",
+        login_id="member01",
+        name="가족",
+        phone_number="+821087654321",
+        password_hash="hash",
+        account_type="family_member",
+    )
+    table = AccountDeletionTable(user)
+    repo.core = table
+
+    repo.delete_user_account(user.user_id)
+
+    assert table.scan_calls == 1
+    assert table.deleted_keys == [
+        {"pk": "TOKEN#refresh-hash", "sk": "REFRESH"},
+        {"pk": "HOUSE#home-old", "sk": "ALIAS#member-1#owner-1"},
+    ]
+    deleted = [decoded_key(operation) for operation in repo.client.transactions[0]]
+    assert deleted == [
+        {"pk": "LOGINID#member01", "sk": "USER"},
+        {"pk": "PHONE#+821087654321", "sk": "USER"},
+        {"pk": "USER#member-1", "sk": "PROFILE"},
+    ]
 
 
 def test_final_user_and_household_deserialization_accepts_stored_maps():

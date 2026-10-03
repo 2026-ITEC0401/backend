@@ -127,6 +127,8 @@ class Device:
         return {
             "device_id": self.device_id,
             "location": self.location,
+            "device_type": self.device_type,
+            "led_alert_control_supported": self.device_type == "alert_node",
             "desired_mqtt_connected": self.desired_mqtt_connected,
             "reported_mqtt_connected": self.reported_mqtt_connected,
             "last_seen_at": self.last_seen_at,
