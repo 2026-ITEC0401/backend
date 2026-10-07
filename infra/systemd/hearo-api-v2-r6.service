@@ -1,0 +1,22 @@
+[Unit]
+Description=Hearo FastAPI v2.4.0 production
+After=network-online.target
+Wants=network-online.target
+
+# Install under the existing hearo-api-v2-final.service name only at approved cutover.
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/opt/hearo-backend-v2-r6
+EnvironmentFile=/etc/hearo/hearo-api-v2.env
+ExecStart=/opt/hearo-backend-v2-r6/.venv/bin/python -m uvicorn dashboard_api_v2:app --host 127.0.0.1 --port 8001 --workers 1 --proxy-headers --root-path /v2
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

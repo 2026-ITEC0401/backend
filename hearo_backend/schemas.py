@@ -134,6 +134,8 @@ class SignupRequest(StrictModel):
     emergency_address: EmergencyAddressRequest | None = None
     terms_service_agreed: Literal[True]
     privacy_agreed: Literal[True]
+    terms_version: str | None = Field(default=None, min_length=1, max_length=64)
+    privacy_version: str | None = Field(default=None, min_length=1, max_length=64)
 
     @field_validator("login_id")
     @classmethod
@@ -153,6 +155,11 @@ class SignupRequest(StrictModel):
     @field_validator("household_name")
     @classmethod
     def normalize_household_name(cls, value: str | None) -> str | None:
+        return _normalize_text(value) if value is not None else None
+
+    @field_validator("terms_version", "privacy_version")
+    @classmethod
+    def normalize_legal_version(cls, value: str | None) -> str | None:
         return _normalize_text(value) if value is not None else None
 
     @model_validator(mode="after")
@@ -191,6 +198,18 @@ class PasswordChangeRequest(StrictModel):
 
 class AccountDeletionRequest(StrictModel):
     current_password: str = Field(min_length=1, max_length=256)
+
+
+class LegalConsentRequest(StrictModel):
+    terms_service_agreed: Literal[True]
+    privacy_agreed: Literal[True]
+    terms_version: str = Field(min_length=1, max_length=64)
+    privacy_version: str = Field(min_length=1, max_length=64)
+
+    @field_validator("terms_version", "privacy_version")
+    @classmethod
+    def normalize_legal_version(cls, value: str) -> str:
+        return _normalize_text(value)
 
 
 class InviteCodeRequest(StrictModel):

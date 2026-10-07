@@ -1,0 +1,41 @@
+[Unit]
+Description=Hearo expired alert retention maintenance
+After=network-online.target
+Wants=network-online.target
+
+# DEPLOYMENT GATE: install is harmless, but do not enable the companion timer
+# until the 90-day TTL migration, protected backup, manual purge preview, target
+# identity checks, and rollback review have all succeeded in production.
+[Service]
+Type=oneshot
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/opt/hearo-backend-v2-r6
+EnvironmentFile=/etc/hearo/hearo-alert-retention.env
+
+# Fail closed when any independently confirmed AWS target value is absent.
+ExecStartPre=/usr/bin/test x${HEARO_RETENTION_REGION} != x
+ExecStartPre=/usr/bin/test x${HEARO_RETENTION_ALERTS_TABLE} != x
+ExecStartPre=/usr/bin/test x${HEARO_RETENTION_CORE_TABLE} != x
+ExecStartPre=/usr/bin/test x${HEARO_RETENTION_CONFIRM_REGION} != x
+ExecStartPre=/usr/bin/test x${HEARO_RETENTION_CONFIRM_ALERTS_TABLE} != x
+ExecStartPre=/usr/bin/test x${HEARO_RETENTION_CONFIRM_CORE_TABLE} != x
+ExecStartPre=/usr/bin/test x${HEARO_RETENTION_CONFIRM_ALERTS_TABLE_ARN} != x
+ExecStartPre=/usr/bin/test x${HEARO_RETENTION_CONFIRM_CORE_TABLE_ARN} != x
+
+# Scheduled mode is intentionally limited by the CLI to conditionally deleting
+# already-expired alert bodies, matching ALERTID aliases, and expired orphan
+# ALERTID aliases verified absent from the alerts table in a transaction. It cannot run
+# migrations and it does not create operator backups.
+ExecStart=/opt/hearo-backend-v2-r6/.venv/bin/python -u scripts/alert_retention.py --mode purge --scheduled --apply --region ${HEARO_RETENTION_REGION} --alerts-table ${HEARO_RETENTION_ALERTS_TABLE} --core-table ${HEARO_RETENTION_CORE_TABLE} --confirm-region ${HEARO_RETENTION_CONFIRM_REGION} --confirm-alerts-table ${HEARO_RETENTION_CONFIRM_ALERTS_TABLE} --confirm-core-table ${HEARO_RETENTION_CONFIRM_CORE_TABLE} --confirm-alerts-table-arn ${HEARO_RETENTION_CONFIRM_ALERTS_TABLE_ARN} --confirm-core-table-arn ${HEARO_RETENTION_CONFIRM_CORE_TABLE_ARN}
+
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+LockPersonality=true
+RestrictSUIDSGID=true

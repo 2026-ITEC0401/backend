@@ -7,6 +7,7 @@ from typing import Any
 import phonenumbers
 
 from .config import Settings
+from .consent import validate_signup_versions
 from .domain import Device, EmergencyAddress, FIXED_DEVICES, Household, User, iso_utc, parse_timestamp
 from .history import HISTORY_DAYS, group_history, history_utc_range
 from .security import (
@@ -50,6 +51,11 @@ def _new_invite(settings: Settings, household_id: str) -> tuple[str, str, str, s
 
 
 def signup(repository, tokens: TokenManager, settings: Settings, request) -> dict[str, Any]:
+    terms_version, privacy_version = validate_signup_versions(
+        settings,
+        request.terms_version,
+        request.privacy_version,
+    )
     login_id = normalize_login_id(request.login_id)
     phone_number = normalize_phone(request.phone_number)
     password_hash = hash_password(request.password)
@@ -76,6 +82,8 @@ def signup(repository, tokens: TokenManager, settings: Settings, request) -> dic
             terms_service_agreed=True,
             privacy_agreed=True,
             consented_at=now,
+            terms_version=terms_version,
+            privacy_version=privacy_version,
         )
         address = request.emergency_address
         if request.household_name is None:
@@ -126,6 +134,8 @@ def signup(repository, tokens: TokenManager, settings: Settings, request) -> dic
             terms_service_agreed=True,
             privacy_agreed=True,
             consented_at=now,
+            terms_version=terms_version,
+            privacy_version=privacy_version,
         )
         repository.create_unlinked_user(user)
 

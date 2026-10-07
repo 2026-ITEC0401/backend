@@ -2,13 +2,21 @@ from __future__ import annotations
 
 import threading
 import uuid
-from dataclasses import MISSING, asdict, fields
+from dataclasses import MISSING, asdict, fields, replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
+from . import retention as alert_retention
 from .config import Settings
 from .domain import Alert, Device, EmergencyAddress, Household, User, iso_utc, parse_timestamp
+from .legal_storage import consent_receipt, valid_consent_time
+from .retention import (
+    AlertTimestampError,
+    alert_expiry_epoch,
+    is_expired_timestamp,
+    is_visible_alert,
+)
 
 
 class StoreError(ValueError):
@@ -63,6 +71,7 @@ class MemoryRepository:
         self.contacts: dict[str, dict[str, dict[str, Any]]] = {}
         self.alerts: dict[str, list[Alert]] = {}
         self.alarm_last_seen: dict[tuple[str, str], str] = {}
+        self.legal_consents: dict[str, list[dict[str, Any]]] = {}
         self._lock = threading.RLock()
 
     def create_owner(
@@ -73,6 +82,7 @@ class MemoryRepository:
     ) -> None:
         with self._lock:
             self._check_identity_conflicts(user)
+            receipt = consent_receipt(user)
             self.users[user.user_id] = user
             self.users_by_login_id[user.login_id] = user.user_id
             self.users_by_phone[user.phone_number] = user.user_id
@@ -83,6 +93,8 @@ class MemoryRepository:
             )
             self.contacts[household.household_id] = {}
             self.alerts[household.household_id] = []
+            if receipt is not None:
+                self.legal_consents[user.user_id] = [receipt]
             for device in devices:
                 self.devices[(device.household_id, device.device_id)] = device
                 if device.credential_hash:
@@ -114,12 +126,42 @@ class MemoryRepository:
     def create_unlinked_user(self, user: User) -> None:
         with self._lock:
             self._check_identity_conflicts(user)
+            receipt = consent_receipt(user)
             self.users[user.user_id] = user
             self.users_by_login_id[user.login_id] = user.user_id
             self.users_by_phone[user.phone_number] = user.user_id
+            if receipt is not None:
+                self.legal_consents[user.user_id] = [receipt]
+
+    def record_legal_consent(
+        self, user_id: str, terms_version: str, privacy_version: str, consented_at: str,
+    ) -> User:
+        with self._lock:
+            user = self.users.get(user_id)
+            if user is None:
+                raise NotFoundError("사용자를 찾을 수 없습니다.")
+            if (user.terms_version == terms_version and user.privacy_version == privacy_version
+                    and user.terms_service_agreed is True and user.privacy_agreed is True
+                    and valid_consent_time(user.consented_at) is not None):
+                return user
+            previous_at = valid_consent_time(user.consented_at)
+            if previous_at and parse_timestamp(consented_at) < previous_at:
+                raise ConflictError("동의 시각의 일관성을 확인할 수 없습니다.", code="LEGAL_CONSENT_CONFLICT")
+            updated = replace(
+                user, terms_version=terms_version, privacy_version=privacy_version,
+                terms_service_agreed=True, privacy_agreed=True,
+                consented_at=iso_utc(parse_timestamp(consented_at)),
+            )
+            receipt = consent_receipt(updated)
+            self.legal_consents.setdefault(user_id, []).append(receipt)
+            self.users[user_id] = updated
+            return updated
 
     def get_user(self, user_id: str) -> User | None:
         return self.users.get(user_id)
+
+    def get_user_consistent(self, user_id: str) -> User | None:
+        return self.get_user(user_id)
 
     def get_user_by_login_id(self, login_id: str) -> User | None:
         user_id = self.users_by_login_id.get(login_id)
@@ -127,7 +169,9 @@ class MemoryRepository:
 
     def update_user_password(self, user_id: str, password_hash: str) -> User:
         with self._lock:
-            user = self.users[user_id]
+            user = self.users.get(user_id)
+            if user is None:
+                raise NotFoundError("사용자를 찾을 수 없습니다.")
             user.password_hash = password_hash
             user.token_version += 1
             return user
@@ -164,9 +208,13 @@ class MemoryRepository:
                 if key[1] != user_id
             }
             self.users.pop(user_id, None)
+            self.legal_consents.pop(user_id, None)
 
     def get_household(self, household_id: str) -> Household | None:
         return self.households.get(household_id)
+
+    def get_household_consistent(self, household_id: str) -> Household | None:
+        return self.get_household(household_id)
 
     def update_household_emergency_address(
         self, household_id: str, address: EmergencyAddress
@@ -193,9 +241,25 @@ class MemoryRepository:
         member_user_id: str,
         display_name: str,
     ) -> None:
-        if member_user_id not in self.members.get(household_id, set()):
-            raise NotFoundError("가족 구성원을 찾을 수 없습니다.")
-        self.display_names[(household_id, viewer_user_id, member_user_id)] = display_name
+        with self._lock:
+            viewer = self.users.get(viewer_user_id)
+            member = self.users.get(member_user_id)
+            linked_users = self.members.get(household_id, set())
+            if (
+                viewer is None
+                or member is None
+                or viewer_user_id not in linked_users
+                or member_user_id not in linked_users
+                or viewer.household_link_status != "linked"
+                or member.household_link_status != "linked"
+                or viewer.household_id != household_id
+                or member.household_id != household_id
+            ):
+                raise NotFoundError("가족 구성원을 찾을 수 없습니다.")
+            viewer.reference_version += 1
+            if member_user_id != viewer_user_id:
+                member.reference_version += 1
+            self.display_names[(household_id, viewer_user_id, member_user_id)] = display_name
 
     def delete_display_name(
         self, household_id: str, viewer_user_id: str, member_user_id: str
@@ -321,11 +385,16 @@ class MemoryRepository:
             return {"household_link_status": "unlinked", "household_status": "active"}
 
     def save_refresh_token(self, token_hash: str, user_id: str, expires_at: str) -> None:
-        self.refresh_tokens[token_hash] = {
-            "user_id": user_id,
-            "expires_at": expires_at,
-            "used_at": None,
-        }
+        with self._lock:
+            user = self.users.get(user_id)
+            if user is None:
+                raise NotFoundError("사용자를 찾을 수 없습니다.")
+            user.reference_version += 1
+            self.refresh_tokens[token_hash] = {
+                "user_id": user_id,
+                "expires_at": expires_at,
+                "used_at": None,
+            }
 
     def consume_refresh_token(self, token_hash: str, now: datetime) -> str:
         with self._lock:
@@ -448,6 +517,17 @@ class MemoryRepository:
             raise NotFoundError("연락처를 찾을 수 없습니다.")
 
     def put_alert(self, alert: Alert) -> bool:
+        try:
+            expires_at_epoch = alert_expiry_epoch(alert.timestamp)
+        except AlertTimestampError as exc:
+            raise StoreError(
+                "알림 발생 시각이 올바르지 않습니다.",
+                code="INVALID_ALERT_TIMESTAMP",
+                field_errors={"timestamp": "유효한 ISO 8601 시각을 입력해 주세요."},
+            ) from exc
+        alert.expires_at_epoch = expires_at_epoch
+        if is_expired_timestamp(alert.timestamp, alert_retention.utc_now()):
+            return False
         with self._lock:
             values = self.alerts.setdefault(alert.household_id, [])
             if any(existing.event_id == alert.event_id for existing in values):
@@ -456,29 +536,38 @@ class MemoryRepository:
             return True
 
     def query_alerts(self, household_id: str, start: datetime, end_exclusive: datetime) -> list[Alert]:
+        now = alert_retention.utc_now()
         return sorted(
             [
                 alert
                 for alert in self.alerts.get(household_id, [])
-                if start <= parse_timestamp(alert.timestamp) < end_exclusive
+                if is_visible_alert(alert, now)
+                and start <= parse_timestamp(alert.timestamp) < end_exclusive
             ],
             key=lambda item: parse_timestamp(item.timestamp),
             reverse=True,
         )
 
     def get_alert(self, household_id: str, event_id: str) -> Alert | None:
+        now = alert_retention.utc_now()
         return next(
             (
                 alert
                 for alert in self.alerts.get(household_id, [])
                 if alert.event_id == event_id
+                and is_visible_alert(alert, now)
             ),
             None,
         )
 
     def latest_alerts(self, household_id: str, limit: int) -> list[Alert]:
+        now = alert_retention.utc_now()
         return sorted(
-            self.alerts.get(household_id, []),
+            [
+                alert
+                for alert in self.alerts.get(household_id, [])
+                if is_visible_alert(alert, now)
+            ],
             key=lambda item: parse_timestamp(item.timestamp),
             reverse=True,
         )[:limit]
@@ -580,6 +669,12 @@ class DynamoRepository:
                 )
             },
         ]
+        receipt = consent_receipt(user)
+        if receipt is not None:
+            puts.append({
+                "Item": self._ddb(receipt),
+                "ConditionExpression": "attribute_not_exists(pk)",
+            })
         if household.invite_hash and household.invite_expires_at:
             puts.append(
                 {
@@ -681,13 +776,30 @@ class DynamoRepository:
                             ),
                         }
                     },
-                ]
+                ] + self._initial_consent_operations(user)
             )
         except Exception as exc:
             self._raise_identity_conflict(user, exc)
 
+    def _initial_consent_operations(self, user: User) -> list[dict[str, Any]]:
+        receipt = consent_receipt(user)
+        if receipt is None:
+            return []
+        return [{"Put": {
+            "TableName": self.settings.core_table,
+            "Item": self._ddb(receipt),
+            "ConditionExpression": "attribute_not_exists(pk)",
+        }}]
+
     def get_user(self, user_id: str) -> User | None:
         result = self.core.get_item(Key={"pk": f"USER#{user_id}", "sk": "PROFILE"})
+        return self._user(result.get("Item"))
+
+    def get_user_consistent(self, user_id: str) -> User | None:
+        result = self.core.get_item(
+            Key={"pk": f"USER#{user_id}", "sk": "PROFILE"},
+            ConsistentRead=True,
+        )
         return self._user(result.get("Item"))
 
     def get_user_by_login_id(self, login_id: str) -> User | None:
@@ -696,18 +808,88 @@ class DynamoRepository:
         return self.get_user(alias["user_id"]) if alias else None
 
     def update_user_password(self, user_id: str, password_hash: str) -> User:
-        result = self.core.update_item(
-            Key={"pk": f"USER#{user_id}", "sk": "PROFILE"},
-            UpdateExpression="SET password_hash=:hash ADD token_version :one",
-            ExpressionAttributeValues={":hash": password_hash, ":one": 1},
-            ReturnValues="ALL_NEW",
-        )
+        try:
+            result = self.core.update_item(
+                Key={"pk": f"USER#{user_id}", "sk": "PROFILE"},
+                UpdateExpression="SET password_hash=:hash ADD token_version :one",
+                ConditionExpression="attribute_exists(pk)",
+                ExpressionAttributeValues={":hash": password_hash, ":one": 1},
+                ReturnValues="ALL_NEW",
+            )
+        except Exception as exc:
+            if getattr(exc, "response", {}).get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+                raise NotFoundError("사용자를 찾을 수 없습니다.") from exc
+            raise
         return self._user(result["Attributes"])
 
-    def delete_user_account(self, user_id: str) -> None:
-        from boto3.dynamodb.conditions import Attr
+    def record_legal_consent(
+        self, user_id: str, terms_version: str, privacy_version: str, consented_at: str,
+    ) -> User:
+        at = iso_utc(parse_timestamp(consented_at))
+        for _ in range(3):
+            current = self._user(self.core.get_item(
+                Key={"pk": f"USER#{user_id}", "sk": "PROFILE"}, ConsistentRead=True,
+            ).get("Item"))
+            if current is None:
+                raise NotFoundError("사용자를 찾을 수 없습니다.")
+            if (current.terms_version == terms_version and current.privacy_version == privacy_version
+                    and current.terms_service_agreed is True and current.privacy_agreed is True
+                    and valid_consent_time(current.consented_at) is not None):
+                return current
+            # Preserve monotonic actual consent times even during concurrent requests.
+            previous_at = valid_consent_time(current.consented_at)
+            if previous_at and parse_timestamp(at) < previous_at:
+                raise ConflictError("동의 시각의 일관성을 확인할 수 없습니다.", code="LEGAL_CONSENT_CONFLICT")
+            updated = replace(
+                current, terms_version=terms_version, privacy_version=privacy_version,
+                terms_service_agreed=True, privacy_agreed=True, consented_at=at,
+            )
+            receipt = consent_receipt(updated)
+            values = {
+                ":terms": terms_version, ":privacy": privacy_version, ":at": at,
+                ":yes": True, ":old_terms": current.terms_version,
+                ":old_privacy": current.privacy_version, ":old_at": current.consented_at,
+                ":token": current.token_version,
+            }
+            token_condition = "token_version = :token"
+            if current.token_version == 0:
+                token_condition = "(attribute_not_exists(token_version) OR token_version = :token)"
+            try:
+                self.client.transact_write_items(TransactItems=[
+                    {"Update": {
+                        "TableName": self.settings.core_table,
+                        "Key": self._ddb({"pk": f"USER#{user_id}", "sk": "PROFILE"}),
+                        "UpdateExpression": "SET terms_version=:terms, privacy_version=:privacy, "
+                            "consented_at=:at, terms_service_agreed=:yes, privacy_agreed=:yes",
+                        "ConditionExpression": "attribute_exists(pk) AND " + token_condition
+                            + " AND (attribute_not_exists(terms_version) OR terms_version=:old_terms)"
+                            + " AND (attribute_not_exists(privacy_version) OR privacy_version=:old_privacy)"
+                            + " AND (attribute_not_exists(consented_at) OR consented_at=:old_at)",
+                        "ExpressionAttributeValues": self._ddb(values),
+                    }},
+                    {"Put": {
+                        "TableName": self.settings.core_table, "Item": self._ddb(receipt),
+                        "ConditionExpression": "attribute_not_exists(pk)",
+                    }},
+                ])
+                return updated
+            except Exception as exc:
+                response = getattr(exc, "response", {})
+                reasons = response.get("CancellationReasons", [])
+                if (response.get("Error", {}).get("Code") != "TransactionCanceledException"
+                        or not reasons
+                        or any(reason.get("Code") not in {"None", "ConditionalCheckFailed", "TransactionConflict"}
+                               for reason in reasons)):
+                    raise
+        raise ConflictError("다른 요청으로 동의 상태가 변경되었습니다. 다시 시도해 주세요.",
+                            code="LEGAL_CONSENT_CONFLICT")
 
-        user = self.get_user(user_id)
+    def delete_user_account(self, user_id: str) -> None:
+        from boto3.dynamodb.conditions import Attr, Key
+
+        user = self._user(self.core.get_item(
+            Key={"pk": f"USER#{user_id}", "sk": "PROFILE"}, ConsistentRead=True,
+        ).get("Item"))
         if not user:
             raise NotFoundError("사용자를 찾을 수 없습니다.")
         if user.household_link_status == "linked":
@@ -724,6 +906,7 @@ class DynamoRepository:
         scan_arguments: dict[str, Any] = {
             "FilterExpression": reference_filter,
             "ProjectionExpression": "pk, sk",
+            "ConsistentRead": True,
         }
         reference_keys: list[dict[str, str]] = []
         while True:
@@ -737,10 +920,84 @@ class DynamoRepository:
                 break
             scan_arguments["ExclusiveStartKey"] = last_key
 
-        try:
-            for key in reference_keys:
-                self.core.delete_item(Key=key)
+        # Read receipts before removing the identity. A failed cleanup must leave
+        # PROFILE and its login aliases alive so the user can retry withdrawal.
+        consent_query: dict[str, Any] = {
+            "KeyConditionExpression": Key("pk").eq(f"USER#{user_id}")
+                & Key("sk").begins_with("CONSENT#"),
+            "ProjectionExpression": "pk, sk", "ConsistentRead": True,
+        }
+        while True:
+            response = self.core.query(**consent_query)
+            reference_keys.extend(
+                {"pk": item["pk"], "sk": item["sk"]} for item in response.get("Items", [])
+            )
+            last_key = response.get("LastEvaluatedKey")
+            if not last_key:
+                break
+            consent_query["ExclusiveStartKey"] = last_key
 
+        # These conditions also reject a concurrent relink or new consent. Both
+        # writers update PROFILE atomically; a successful final deletion therefore
+        # cannot overlook a receipt written after the consistent query above.
+        snapshot_fields = {
+            "household_link_status": "unlinked", "household_id": user.household_id,
+            "token_version": user.token_version, "terms_version": user.terms_version,
+            "privacy_version": user.privacy_version, "consented_at": user.consented_at,
+            "terms_service_agreed": user.terms_service_agreed, "privacy_agreed": user.privacy_agreed,
+            "reference_version": user.reference_version,
+            "login_id": user.login_id, "phone_number": user.phone_number,
+        }
+        conditions = ["attribute_exists(pk)"]
+        snapshot_values = {}
+        for field, value in snapshot_fields.items():
+            placeholder = f":snapshot_{field}"
+            snapshot_values[placeholder] = value
+            if (value is None
+                    or (field in {"token_version", "reference_version"} and value == 0)
+                    or (field in {"terms_service_agreed", "privacy_agreed"} and value is False)
+                    or field == "household_link_status"):
+                conditions.append(f"(attribute_not_exists({field}) OR {field}={placeholder})")
+            else:
+                conditions.append(f"{field}={placeholder}")
+        guard = {
+            "TableName": self.settings.core_table,
+            "Key": self._ddb({"pk": f"USER#{user_id}", "sk": "PROFILE"}),
+            "ConditionExpression": " AND ".join(conditions),
+            "ExpressionAttributeValues": self._ddb(snapshot_values),
+        }
+        identity_keys = {
+            (f"LOGINID#{user.login_id}", "USER"), (f"PHONE#{user.phone_number}", "USER"),
+            (f"USER#{user_id}", "PROFILE"),
+        }
+        all_cleanup = {(key["pk"], key["sk"]) for key in reference_keys} - identity_keys
+        receipt_keys = sorted(key for key in all_cleanup
+                              if key[0] == f"USER#{user_id}" and key[1].startswith("CONSENT#"))
+        cleanup_keys = sorted(all_cleanup - set(receipt_keys))
+        if len(receipt_keys) > 97:
+            # Keep every receipt until the final atomic identity deletion.
+            # Very large document-version histories need an operator workflow.
+            raise ConflictError(
+                "관련 기록이 많아 자동 탈퇴를 완료할 수 없습니다. 관리자에게 문의해 주세요.",
+                code="ACCOUNT_DELETION_REVIEW_REQUIRED",
+            )
+
+        def deletes(keys):
+            return [{"Delete": {
+                "TableName": self.settings.core_table,
+                "Key": self._ddb({"pk": pk, "sk": sk}),
+            }} for pk, sk in keys]
+
+        try:
+            # Token/display-name cleanup may be resumed if a later step fails;
+            # PROFILE, aliases and all consent receipts remain intact meanwhile.
+            # New reference writes update the snapshot version and force a retry.
+            while len(cleanup_keys) + len(receipt_keys) > 97:
+                batch = cleanup_keys[:99]
+                self.client.transact_write_items(TransactItems=[
+                    {"ConditionCheck": guard}, *deletes(batch),
+                ])
+                cleanup_keys = cleanup_keys[99:]
             self.client.transact_write_items(
                 TransactItems=[
                     {
@@ -765,14 +1022,11 @@ class DynamoRepository:
                     },
                     {
                         "Delete": {
-                            "TableName": self.settings.core_table,
-                            "Key": self._ddb(
-                                {"pk": f"USER#{user_id}", "sk": "PROFILE"}
-                            ),
-                            "ConditionExpression": "attribute_exists(pk)",
+                            **guard,
                         }
                     },
-                ]
+                    *deletes(cleanup_keys + receipt_keys),
+                ],
             )
         except Exception as exc:
             raise ConflictError(
@@ -782,6 +1036,13 @@ class DynamoRepository:
 
     def get_household(self, household_id: str) -> Household | None:
         item = self.core.get_item(Key={"pk": f"HOUSE#{household_id}", "sk": "META"}).get("Item")
+        return self._household(item)
+
+    def get_household_consistent(self, household_id: str) -> Household | None:
+        item = self.core.get_item(
+            Key={"pk": f"HOUSE#{household_id}", "sk": "META"},
+            ConsistentRead=True,
+        ).get("Item")
         return self._household(item)
 
     def update_household_emergency_address(
@@ -826,19 +1087,37 @@ class DynamoRepository:
         member_user_id: str,
         display_name: str,
     ) -> None:
-        member = self.get_user(member_user_id)
-        if not member or member.household_id != household_id:
-            raise NotFoundError("가족 구성원을 찾을 수 없습니다.")
-        self.core.put_item(
-            Item={
+        values = self._ddb({":household": household_id, ":linked": "linked", ":one": 1})
+        operations = []
+        for user_id in dict.fromkeys((viewer_user_id, member_user_id)):
+            operations.append({"Update": {
+                "TableName": self.settings.core_table,
+                "Key": self._ddb({"pk": f"USER#{user_id}", "sk": "PROFILE"}),
+                "UpdateExpression": "ADD reference_version :one",
+                "ConditionExpression": (
+                    "attribute_exists(pk) AND household_id=:household "
+                    "AND household_link_status=:linked"
+                ),
+                "ExpressionAttributeValues": values,
+            }})
+        operations.append({"Put": {
+            "TableName": self.settings.core_table,
+            "Item": self._ddb({
                 "pk": f"HOUSE#{household_id}",
                 "sk": f"ALIAS#{viewer_user_id}#{member_user_id}",
                 "viewer_user_id": viewer_user_id,
                 "member_user_id": member_user_id,
                 "display_name": display_name,
                 "updated_at": iso_utc(),
-            }
-        )
+            }),
+        }})
+        try:
+            self.client.transact_write_items(TransactItems=operations)
+        except Exception as exc:
+            response = getattr(exc, "response", {})
+            if response.get("Error", {}).get("Code") == "TransactionCanceledException":
+                raise NotFoundError("가족 구성원을 찾을 수 없습니다.") from exc
+            raise
 
     def delete_display_name(
         self, household_id: str, viewer_user_id: str, member_user_id: str
@@ -1073,7 +1352,6 @@ class DynamoRepository:
         household = self.get_household(household_id)
         if not household or household.status != "active":
             raise ConflictError("활성 가구를 찾을 수 없습니다.", code="HOUSEHOLD_INACTIVE")
-        unlinked_values = self._ddb({":unlinked": "unlinked"})
         if user.role != "owner":
             self.client.transact_write_items(
                 TransactItems=[
@@ -1149,7 +1427,8 @@ class DynamoRepository:
                                 "REMOVE household_id, #role, linked_at"
                             ),
                             "ExpressionAttributeNames": {"#role": "role"},
-                            "ExpressionAttributeValues": unlinked_values,
+                            "ConditionExpression": "attribute_exists(pk) AND household_id=:house",
+                            "ExpressionAttributeValues": self._ddb({":unlinked": "unlinked", ":house": household_id}),
                         }
                     },
                     {
@@ -1166,12 +1445,30 @@ class DynamoRepository:
         return {"household_link_status": "unlinked", "household_status": "inactive"}
 
     def _save_token(self, kind: str, token_hash: str, user_id: str, expires_at: str) -> None:
-        self.core.put_item(Item={
-            "pk": f"TOKEN#{token_hash}", "sk": kind,
-            "user_id": user_id,
-            "expires_at": expires_at,
-            "expires_at_epoch": int(parse_timestamp(expires_at).timestamp()),
-        })
+        try:
+            self.client.transact_write_items(TransactItems=[
+                {"Update": {
+                    "TableName": self.settings.core_table,
+                    "Key": self._ddb({"pk": f"USER#{user_id}", "sk": "PROFILE"}),
+                    "UpdateExpression": "ADD reference_version :one",
+                    "ConditionExpression": "attribute_exists(pk)",
+                    "ExpressionAttributeValues": self._ddb({":one": 1}),
+                }},
+                {"Put": {
+                    "TableName": self.settings.core_table,
+                    "Item": self._ddb({
+                        "pk": f"TOKEN#{token_hash}", "sk": kind,
+                        "user_id": user_id,
+                        "expires_at": expires_at,
+                        "expires_at_epoch": int(parse_timestamp(expires_at).timestamp()),
+                    }),
+                }},
+            ])
+        except Exception as exc:
+            response = getattr(exc, "response", {})
+            if response.get("Error", {}).get("Code") == "TransactionCanceledException":
+                raise NotFoundError("사용자를 찾을 수 없습니다.") from exc
+            raise
 
     def save_refresh_token(self, token_hash: str, user_id: str, expires_at: str) -> None:
         self._save_token("REFRESH", token_hash, user_id, expires_at)
@@ -1185,7 +1482,7 @@ class DynamoRepository:
             self.core.update_item(
                 Key=key,
                 UpdateExpression="SET used_at=:used",
-                ConditionExpression="attribute_not_exists(used_at)",
+                ConditionExpression="attribute_exists(pk) AND attribute_not_exists(used_at)",
                 ExpressionAttributeValues={":used": iso_utc(now)},
             )
         except Exception as exc:
@@ -1421,6 +1718,17 @@ class DynamoRepository:
         return Alert(**{key: data.get(key) for key in Alert.__dataclass_fields__})
 
     def put_alert(self, alert: Alert) -> bool:
+        try:
+            expires_at_epoch = alert_expiry_epoch(alert.timestamp)
+        except AlertTimestampError as exc:
+            raise StoreError(
+                "알림 발생 시각이 올바르지 않습니다.",
+                code="INVALID_ALERT_TIMESTAMP",
+                field_errors={"timestamp": "유효한 ISO 8601 시각을 입력해 주세요."},
+            ) from exc
+        alert.expires_at_epoch = expires_at_epoch
+        if is_expired_timestamp(alert.timestamp, alert_retention.utc_now()):
+            return False
         item = asdict(alert)
         item["event_key"] = alert.event_key
         item["alarm_lookup_key"] = f"{alert.household_id}#{alert.event_id}"
@@ -1450,6 +1758,7 @@ class DynamoRepository:
                                     "pk": f"ALERTID#{alert.household_id}#{alert.event_id}",
                                     "sk": "ALERT",
                                     "event_key": alert.event_key,
+                                    "expires_at_epoch": expires_at_epoch,
                                 }
                             ),
                             "ConditionExpression": "attribute_not_exists(pk)",
@@ -1469,15 +1778,23 @@ class DynamoRepository:
         from botocore.exceptions import ClientError
 
         lookup_key = f"{household_id}#{event_id}"
+        now = alert_retention.utc_now()
         try:
-            response = self.alerts.query(
-                IndexName="alarm-lookup-index",
-                KeyConditionExpression=Key("alarm_lookup_key").eq(lookup_key),
-                Limit=1,
-            )
-            items = response.get("Items", [])
-            if items:
-                return self._alert(items[0])
+            kwargs: dict[str, Any] = {
+                "IndexName": "alarm-lookup-index",
+                "KeyConditionExpression": Key("alarm_lookup_key").eq(lookup_key),
+                "Limit": 25,
+            }
+            while True:
+                response = self.alerts.query(**kwargs)
+                for item in response.get("Items", []):
+                    alert = self._alert(item)
+                    if is_visible_alert(alert, now):
+                        return alert
+                last_key = response.get("LastEvaluatedKey")
+                if not last_key:
+                    break
+                kwargs["ExclusiveStartKey"] = last_key
         except ClientError as exc:
             # 기존 배포 테이블에 인덱스가 아직 없을 때만 호환 조회를 사용합니다.
             code = exc.response.get("Error", {}).get("Code")
@@ -1497,9 +1814,10 @@ class DynamoRepository:
         }
         while True:
             response = self.alerts.query(**kwargs)
-            items = response.get("Items", [])
-            if items:
-                return self._alert(items[0])
+            for item in response.get("Items", []):
+                alert = self._alert(item)
+                if is_visible_alert(alert, now):
+                    return alert
             last_key = response.get("LastEvaluatedKey")
             if not last_key:
                 return None
@@ -1510,6 +1828,7 @@ class DynamoRepository:
 
         start_key = iso_utc(start)
         end_key = iso_utc(end_exclusive)
+        now = alert_retention.utc_now()
         result: list[Alert] = []
         kwargs: dict[str, Any] = {
             "KeyConditionExpression": Key("household_id").eq(household_id)
@@ -1518,21 +1837,42 @@ class DynamoRepository:
         }
         while True:
             response = self.alerts.query(**kwargs)
-            result.extend(self._alert(item) for item in response.get("Items", []))
-            if "LastEvaluatedKey" not in response:
+            result.extend(
+                alert
+                for item in response.get("Items", [])
+                if is_visible_alert((alert := self._alert(item)), now)
+            )
+            last_key = response.get("LastEvaluatedKey")
+            if not last_key:
                 break
-            kwargs["ExclusiveStartKey"] = response["LastEvaluatedKey"]
+            kwargs["ExclusiveStartKey"] = last_key
         return result
 
     def latest_alerts(self, household_id: str, limit: int) -> list[Alert]:
         from boto3.dynamodb.conditions import Key
 
-        response = self.alerts.query(
-            KeyConditionExpression=Key("household_id").eq(household_id),
-            ScanIndexForward=False,
-            Limit=limit,
-        )
-        return [self._alert(item) for item in response.get("Items", [])]
+        now = alert_retention.utc_now()
+        result: list[Alert] = []
+        kwargs: dict[str, Any] = {
+            "KeyConditionExpression": Key("household_id").eq(household_id),
+            "ScanIndexForward": False,
+            "Limit": limit,
+        }
+        while len(result) < limit:
+            response = self.alerts.query(**kwargs)
+            result.extend(
+                alert
+                for item in response.get("Items", [])
+                if is_visible_alert((alert := self._alert(item)), now)
+            )
+            if len(result) >= limit:
+                break
+            last_key = response.get("LastEvaluatedKey")
+            if not last_key:
+                break
+            kwargs["ExclusiveStartKey"] = last_key
+            kwargs["Limit"] = limit - len(result)
+        return result[:limit]
 
 
 def create_repository(settings: Settings):

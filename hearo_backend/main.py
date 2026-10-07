@@ -1,7 +1,7 @@
 import asyncio
 import hmac
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any
 
 from fastapi import (
@@ -12,6 +12,7 @@ from fastapi import (
     Path,
     Query,
     Request,
+    Response,
     WebSocket,
     WebSocketDisconnect,
     status,
@@ -23,6 +24,12 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from . import __version__
 from .config import Settings
+from .consent import (
+    LegalConsentError,
+    consent_status,
+    policies_response,
+    record_current_consent,
+)
 from .domain import Alert, EmergencyAddress, Household, User, iso_utc, parse_timestamp
 from .history import SEOUL
 from .integrations import create_mqtt_publisher
@@ -42,6 +49,7 @@ from .schemas import (
     JusoDetailSearchRequest,
     JusoRoadSearchRequest,
     LoginRequest,
+    LegalConsentRequest,
     PasswordChangeRequest,
     RefreshRequest,
     SignupRequest,
@@ -186,6 +194,19 @@ def create_app(
         }
         return JSONResponse(status_code=422, content=error_body(request, detail))
 
+    @app.exception_handler(LegalConsentError)
+    async def legal_consent_error_handler(request: Request, exc: LegalConsentError):
+        detail = {
+            "code": exc.code,
+            "message": str(exc),
+            "field_errors": exc.field_errors,
+        }
+        return JSONResponse(
+            status_code=409,
+            content=error_body(request, detail),
+            headers={"Cache-Control": "no-store"},
+        )
+
     @app.exception_handler(StoreError)
     async def store_error_handler(request: Request, exc: StoreError):
         if isinstance(exc, ConflictError):
@@ -234,6 +255,59 @@ def create_app(
             raise _error(403, "OWNER_REQUIRED", "owner 권한이 필요합니다.")
         return user
 
+    def realtime_user(user_id: str):
+        getter = getattr(
+            app.state.repository,
+            "get_user_consistent",
+            app.state.repository.get_user,
+        )
+        return getter(user_id)
+
+    def realtime_household(household_id: str):
+        getter = getattr(
+            app.state.repository,
+            "get_household_consistent",
+            app.state.repository.get_household,
+        )
+        return getter(household_id)
+
+    async def revoke_household_realtime(
+        user_id: str,
+        household_id: str | None,
+        household_status: str | None,
+    ) -> None:
+        if not household_id:
+            return
+        if household_status == "inactive":
+            await app.state.realtime.broadcast(
+                household_id,
+                {"type": "household.inactivated", "household_id": household_id},
+            )
+            await app.state.realtime.close_household(household_id, code=1008)
+            return
+        await app.state.realtime.broadcast(
+            household_id,
+            {"type": "household.member_removed", "user_id": user_id},
+        )
+        await app.state.realtime.close_user(user_id, code=1008)
+
+    async def close_membership_realtime_conservatively(
+        user_id: str,
+        household_id: str | None,
+        role: str | None,
+    ) -> None:
+        if not household_id:
+            return
+        try:
+            if role == "owner":
+                await app.state.realtime.close_household(household_id, code=1008)
+            else:
+                await app.state.realtime.close_user(user_id, code=1008)
+        except Exception:
+            # Realtime cleanup must never replace the storage error that the
+            # client needs in order to reconcile its membership state.
+            pass
+
     def onboarding_status(user: User, household: Household) -> dict[str, Any]:
         missing_address = household.emergency_address is None
         return {
@@ -275,6 +349,11 @@ def create_app(
     @app.get("/health")
     def health() -> dict[str, str]:
         return {"status": "ok", "version": __version__}
+
+    @app.get("/legal/policies")
+    def legal_policies(response: Response):
+        response.headers["Cache-Control"] = "no-store"
+        return policies_response(app.state.settings)
 
     @app.post("/auth/signup", status_code=status.HTTP_201_CREATED)
     def auth_signup(payload: SignupRequest):
@@ -337,8 +416,40 @@ def create_app(
     def me(user: Annotated[User, Depends(current_user)]):
         return user.public()
 
+    @app.get("/me/consents")
+    def my_consents(
+        response: Response,
+        user: Annotated[User, Depends(current_user)],
+    ):
+        response.headers["Cache-Control"] = "no-store"
+        return consent_status(user, app.state.settings)
+
+    @app.patch("/me/consents")
+    def update_my_consents(
+        payload: LegalConsentRequest,
+        request: Request,
+        response: Response,
+        user: Annotated[User, Depends(current_user)],
+    ):
+        key = _client_key(request, "legal-consent", user.user_id)
+        if not app.state.limiter.check(key, limit=10, window_seconds=15 * 60):
+            raise _error(
+                429,
+                "LEGAL_CONSENT_RATE_LIMITED",
+                "잠시 후 다시 시도하세요.",
+            )
+        updated = record_current_consent(
+            app.state.repository,
+            user,
+            app.state.settings,
+            payload.terms_version,
+            payload.privacy_version,
+        )
+        response.headers["Cache-Control"] = "no-store"
+        return consent_status(updated, app.state.settings)
+
     @app.patch("/me/password", status_code=status.HTTP_204_NO_CONTENT)
-    def update_my_password(
+    async def update_my_password(
         payload: PasswordChangeRequest,
         user: Annotated[User, Depends(current_user)],
     ):
@@ -348,6 +459,7 @@ def create_app(
             payload.current_password,
             payload.new_password,
         )
+        await app.state.realtime.close_user(user.user_id, code=1008)
         return None
 
     @app.delete("/me", status_code=status.HTTP_204_NO_CONTENT)
@@ -355,24 +467,34 @@ def create_app(
         payload: AccountDeletionRequest,
         user: Annotated[User, Depends(current_user)],
     ):
-        result = delete_account(
-            app.state.repository,
-            user,
-            payload.current_password,
+        previous_household_id = user.household_id
+        previous_role = user.role
+        try:
+            result = delete_account(
+                app.state.repository,
+                user,
+                payload.current_password,
+            )
+        except Exception as exc:
+            # The household unlink commits before the final account deletion.
+            # Its outcome can be unknown after a storage error, so revoke the
+            # existing realtime permission conservatively while preserving the
+            # original HTTP error. A password mismatch happens before unlink.
+            if (
+                previous_household_id
+                and getattr(exc, "code", None) != "CURRENT_PASSWORD_MISMATCH"
+            ):
+                await close_membership_realtime_conservatively(
+                    user.user_id,
+                    previous_household_id,
+                    previous_role,
+                )
+            raise
+        await revoke_household_realtime(
+            user.user_id,
+            result["previous_household_id"],
+            result["household_status"],
         )
-        household_id = result["previous_household_id"]
-        if household_id and result["household_status"] == "inactive":
-            await app.state.realtime.broadcast(
-                household_id,
-                {"type": "household.inactivated", "household_id": household_id},
-            )
-            await app.state.realtime.close_household(household_id, code=1008)
-        elif household_id:
-            await app.state.realtime.broadcast(
-                household_id,
-                {"type": "household.member_removed", "user_id": user.user_id},
-            )
-            await app.state.realtime.close_user(user.user_id, code=1008)
         return None
 
     @app.get("/households/current")
@@ -503,13 +625,24 @@ def create_app(
     @app.delete("/households/current/link")
     async def unlink_current_household(user: Annotated[User, Depends(current_user)]):
         previous_household_id = user.household_id
-        result = app.state.repository.unlink_user(user.user_id, datetime.now(UTC))
-        if previous_household_id and result["household_status"] == "inactive":
-            await app.state.realtime.broadcast(
+        previous_role = user.role
+        try:
+            result = app.state.repository.unlink_user(user.user_id, datetime.now(UTC))
+        except Exception:
+            # A transactional write can have an unknown outcome after a
+            # transport failure. Remove any realtime permission that might now
+            # outlive the membership, but preserve the original API error.
+            await close_membership_realtime_conservatively(
+                user.user_id,
                 previous_household_id,
-                {"type": "household.inactivated", "household_id": previous_household_id},
+                previous_role,
             )
-            await app.state.realtime.close_household(previous_household_id, code=1008)
+            raise
+        await revoke_household_realtime(
+            user.user_id,
+            previous_household_id,
+            result["household_status"],
+        )
         return result
 
     @app.get("/households/{household_id}/emergency-address")
@@ -918,9 +1051,17 @@ def create_app(
         if not household or household.status != "active":
             raise _error(409, "HOUSEHOLD_INACTIVE", "비활성화된 가구입니다.")
         try:
-            normalized_timestamp = iso_utc(parse_timestamp(payload.timestamp))
+            occurred_at = parse_timestamp(payload.timestamp)
         except ValueError as exc:
             raise _error(400, "INVALID_TIMESTAMP", str(exc)) from exc
+        if occurred_at > datetime.now(UTC) + timedelta(minutes=5):
+            raise _error(
+                400,
+                "INVALID_TIMESTAMP",
+                "알림 발생 시각은 서버 시각보다 5분을 초과할 수 없습니다.",
+                {"timestamp": "서버 시각과 기기 시각을 확인해 주세요."},
+            )
+        normalized_timestamp = iso_utc(occurred_at)
         publisher_id = payload.publisher_device_id or payload.source_device_id
         if publisher_id != payload.source_device_id:
             raise _error(
@@ -979,8 +1120,8 @@ def create_app(
             raw = await asyncio.wait_for(websocket.receive_json(), timeout=10)
             message = WsAuthMessage.model_validate(raw)
             token_payload = app.state.tokens.decode(message.access_token, "access")
-            user = app.state.repository.get_user(token_payload["sub"])
-            household = app.state.repository.get_household(household_id)
+            user = realtime_user(token_payload["sub"])
+            household = realtime_household(household_id)
             if (
                 not user
                 or user.household_link_status != "linked"
@@ -992,6 +1133,20 @@ def create_app(
                 raise TokenError("이 WebSocket에 접근할 수 없습니다.")
             await app.state.realtime.add(household_id, user.user_id, websocket)
             authenticated = True
+            # Re-check after registration. Otherwise an unlink or password
+            # change can finish between the first read and manager.add(), and
+            # its close operation will not have seen this new connection.
+            current = realtime_user(token_payload["sub"])
+            current_household = realtime_household(household_id)
+            if (
+                not current
+                or current.household_link_status != "linked"
+                or current.household_id != household_id
+                or current.token_version != token_payload.get("tv")
+                or not current_household
+                or current_household.status != "active"
+            ):
+                raise TokenError("이 WebSocket에 접근할 수 없습니다.")
             snapshot = [
                 device_status(item, app.state.settings)
                 for item in app.state.repository.list_devices(household_id)

@@ -1,9 +1,9 @@
 # Hearo 프론트엔드 연동용 백엔드 API 명세
 
-- 문서 상태: 구현 완료·배포 전 최종 검증본
+- 문서 상태: v2.4.0 구현 기준·배포 전 검토용. 탈퇴 실패 복구 등 운영 차단 조건은 [`DEPLOYMENT_V2_4.md`](./DEPLOYMENT_V2_4.md)를 따릅니다.
 - 최초 작성일: 2026-08-17
-- 구현 반영일: 2026-10-03
-- API 구현 버전: 2.3.0 (`/v2` 외부 경로 유지)
+- 구현 반영일: 2026-10-07
+- API 구현 버전: 2.4.0 (`/v2` 외부 경로 유지)
 - 프론트 필드 활용 사전: [10. API 필드별 프론트 활용 가이드](#10-api-필드별-프론트-활용-가이드)
 
 ## 1. 서비스 규칙
@@ -22,6 +22,8 @@
 - 회원 탈퇴는 현재 비밀번호를 재확인한 뒤 로그인 ID·전화번호·프로필·refresh token·개인 표시 이름을 삭제합니다.
 - 진동 알림과 민감도 조절은 화면과 API에서 제거합니다.
 - 알림 이력은 한국시간 기준 오늘을 포함한 최근 7개 달력 날짜를 반환합니다.
+- 알림 데이터는 발생 시각부터 정확히 90일 동안만 사용자 API에서 조회할 수 있습니다. 최근 7일 이력 범위와 90일 보관·조회 기한은 서로 다른 기준입니다.
+- 약관·개인정보 처리방침의 실제 버전, 시행 시각과 공개 URL은 서버 정책 API를 기준으로 합니다. 기존 사용자의 확인되지 않은 버전을 최신 버전으로 임의 배정하지 않습니다.
 - 녹음 파일을 생성·업로드·보관·재생하지 않습니다.
 
 ## 2. 공통 규칙
@@ -63,6 +65,8 @@ Authorization: Bearer {access_token}
 | `detail_address` | 최대 200자, 사용자가 직접 입력, 줄바꿈·제어 문자 금지 |
 | `address_provider` | 신규 입력은 `juso_go_kr` 또는 `manual`; 기존 `kakao_postcode` 레코드는 읽기 호환 |
 | `verified` | 서버가 행안부 응답으로 판정하는 읽기 전용 값. 클라이언트 전송 금지 |
+| `terms_version` | 최대 64자. `GET /legal/policies`가 반환한 현재 약관 버전을 그대로 사용 |
+| `privacy_version` | 최대 64자. `GET /legal/policies`가 반환한 현재 개인정보 처리방침 버전을 그대로 사용 |
 
 회원가입 화면에는 별도 로그인 아이디 입력칸이 필요합니다. 현재 와이어프레임에 없다면 프론트 화면을 추가 수정해야 합니다.
 
@@ -91,11 +95,16 @@ Authorization: Bearer {access_token}
 | `502` | 행안부 응답 형식 오류 |
 | `503` | 행안부 주소 서비스 장애·시간 초과·승인키 설정 오류 |
 
+### 2.5 수동 명세와 생성 OpenAPI의 역할
+
+`/openapi.json`은 경로와 요청 모델을 확인하는 보조 자료입니다. 현재 생성 문서는 `X-Device-Credential`·`X-Internal-Token`을 보안 스키마로 표현하지 않고, 여러 성공 응답 스키마를 빈 객체로 표시하며, 런타임의 `422` 오류 형식도 충분히 반영하지 않습니다. 따라서 프론트·기기 연동에서는 이 문서에 명시한 헤더, 성공 응답, 공통 오류 형식을 계약으로 사용하고 실제 코드·테스트와 함께 변경합니다.
+
 ## 3. 화면별 API 연결표
 
 | 화면 | API | 비고 |
 |---|---|---|
 | 로그인·회원가입 선택 | 없음 | 화면 이동만 수행 |
+| 약관·개인정보 처리방침 표시 | `GET /legal/policies` | 공개 문서 URL·버전·시행 여부 조회 |
 | 로그인 | `POST /auth/login` | `login_id`, `password` |
 | 가입 유형 선택 | 없음 | 선택값을 회원가입 요청에 포함 |
 | 신규 가구 회원가입 | `POST /auth/signup` | 사용자·가구·4개 기기 생성 후 주소 온보딩으로 이동 |
@@ -104,6 +113,7 @@ Authorization: Bearer {access_token}
 | 조회 가구 연동 | `POST /households/link` | 확인 후 실제 연동 |
 | 나중에 하기 | 없음 | 미연동 상태 유지 |
 | 설정 메인 | `GET /me`, `GET /households/current` | 사용자와 연동 상태 표시 |
+| 내 동의 상태·재동의 | `GET /me/consents`, `PATCH /me/consents` | 현재 버전 동의 여부 조회와 명시적 재동의 |
 | 긴급 주소 조회·수정 | `GET/PATCH /households/{id}/emergency-address` | 연동 사용자 조회, owner 수정 |
 | 도로명주소 검색 | `POST /households/{id}/address-search/roads` | owner 전용 행안부 프록시 |
 | 동·층·호 검색 | `POST /households/{id}/address-search/details` | owner 전용 행안부 프록시 |
@@ -129,7 +139,47 @@ Authorization: Bearer {access_token}
 
 ## 4. 인증·회원가입 API
 
-### 4.1 회원가입
+### 4.1 공개 약관 정책 조회
+
+```text
+GET /legal/policies
+```
+
+인증 없이 호출합니다. 서버에 설정된 약관·개인정보 처리방침의 버전, 공개 URL, 시행 여부와 가입 시 버전 동의 강제 여부를 반환합니다. 응답에는 `Cache-Control: no-store`가 포함됩니다.
+
+실제 버전·시행일·URL이 아직 설정되지 않은 호환 모드 응답:
+
+```json
+{
+  "configured": false,
+  "effective": false,
+  "required": false,
+  "effective_at": null,
+  "terms": {
+    "version": null,
+    "url": null
+  },
+  "privacy": {
+    "version": null,
+    "url": null
+  }
+}
+```
+
+| 필드 | 의미 |
+|---|---|
+| `configured` | 두 버전·시행 시각·두 공개 URL이 모두 설정됐는지 나타냅니다. 부분 설정은 애플리케이션 시작 단계에서 거부됩니다. |
+| `effective` | 서버 현재 시각이 `effective_at`에 도달했는지 나타냅니다. `false`이면 해당 버전으로 아직 동의할 수 없습니다. |
+| `required` | 시행된 현재 버전 없이 신규 가입할 수 있는지 결정하는 서버 설정입니다. 기존 계정의 로그인·기기·MQTT·회원 탈퇴를 일괄 차단하지 않습니다. |
+| `effective_at` | 시간대가 포함된 ISO 8601 시행 시각입니다. 미설정이면 `null`입니다. |
+| `terms.version`, `privacy.version` | 가입·재동의 요청에 그대로 복사할 현재 문서 버전입니다. 미설정이면 `null`입니다. |
+| `terms.url`, `privacy.url` | 사용자가 실제 내용을 확인할 공개 문서 URL입니다. 미설정이면 `null`입니다. |
+
+프론트는 URL의 문서를 사용자에게 표시한 뒤 같은 응답의 버전을 가입 또는 재동의 요청에 사용합니다. 버전을 추측하거나 앱에 하드코딩하지 않습니다.
+
+서버 정책은 `HEARO_TERMS_VERSION`, `HEARO_PRIVACY_VERSION`, `HEARO_LEGAL_EFFECTIVE_AT`, `HEARO_TERMS_URL`, `HEARO_PRIVACY_URL` 다섯 값을 모두 비우거나 모두 유효하게 설정합니다. 실제 값이 확정되기 전에는 모두 비우고 `HEARO_LEGAL_CONSENT_REQUIRED=false`를 유지합니다. 버전은 `[A-Za-z0-9][A-Za-z0-9._-]{0,63}`, 시행 시각은 시간대 포함 ISO 8601, 운영 URL은 인증정보·쿼리·fragment가 없는 HTTPS여야 합니다. `HEARO_LEGAL_CONSENT_REQUIRED`는 `true` 또는 `false`만 허용합니다.
+
+### 4.2 회원가입
 
 ```text
 POST /auth/signup
@@ -146,7 +196,9 @@ POST /auth/signup
   "signup_type": "new_household",
   "household_name": "홍길동 가구",
   "terms_service_agreed": true,
-  "privacy_agreed": true
+  "privacy_agreed": true,
+  "terms_version": "terms-v1",
+  "privacy_version": "privacy-v1"
 }
 ```
 
@@ -160,9 +212,23 @@ POST /auth/signup
   "password": "StrongPassword123",
   "signup_type": "family_member",
   "terms_service_agreed": true,
-  "privacy_agreed": true
+  "privacy_agreed": true,
+  "terms_version": "terms-v1",
+  "privacy_version": "privacy-v1"
 }
 ```
+
+위 버전 문자열은 형식 예시입니다. 실제 요청은 `GET /legal/policies`가 반환한 값을 그대로 사용합니다.
+
+가입 동의 호환 규칙:
+
+- `terms_service_agreed`와 `privacy_agreed`는 기존과 같이 항상 `true`여야 합니다.
+- `terms_version`과 `privacy_version`은 기존 프론트 호환을 위해 스키마상 선택 필드이며 둘 다 최대 64자입니다.
+- `required=false`이면 문서가 설정·시행된 뒤에도 두 버전을 모두 생략할 수 있습니다. 이 경우 두 버전은 `null`로 저장하며 서버가 최신 버전을 임의 배정하지 않습니다.
+- 버전을 하나라도 제출하면 정책이 설정되고 시행된 상태여야 하며 두 값 모두 현재 버전과 정확히 일치해야 합니다.
+- `required=true`이고 시행 전이면 버전 제출 여부와 관계없이 가입을 `409 LEGAL_POLICY_NOT_EFFECTIVE`로 거부합니다.
+- `required=true`이고 시행 후인데 두 버전을 모두 생략하면 `409 LEGAL_CONSENT_REQUIRED`, 일부만 제출하거나 현재 버전과 다르면 `409 LEGAL_VERSION_MISMATCH`를 반환합니다.
+- 정책 미설정 상태에서 버전을 임의 제출하면 `409 LEGAL_POLICY_NOT_CONFIGURED`를 반환합니다.
 
 - `emergency_address`는 `new_household` 가입에서 선택 항목입니다. 기존 클라이언트가 주소를 함께 보내는 요청도 계속 허용하지만 서버 검증 전이므로 `verified=false`로 저장합니다.
 - `family_member` 가입에는 주소를 입력하지 않고, 가구 연동 후 해당 가구 주소를 사용합니다.
@@ -181,7 +247,10 @@ POST /auth/signup
     "household_id": null,
     "role": null,
     "household_link_status": "unlinked",
-    "created_at": "2026-08-22T03:00:00Z"
+    "terms_version": "terms-v1",
+    "privacy_version": "privacy-v1",
+    "consented_at": "2026-10-07T03:00:00Z",
+    "created_at": "2026-10-07T03:00:00Z"
   },
   "tokens": {
     "access_token": "...",
@@ -194,7 +263,7 @@ POST /auth/signup
 
 신규 가구 가입 응답에는 최초 기기 설치용 credential이 한 번만 추가로 반환됩니다. 이 값은 프론트에서 지속 보관하지 않고 설치 담당자에게 안전하게 전달해야 합니다.
 
-### 4.2 로그인
+### 4.3 로그인
 
 ```text
 POST /auth/login
@@ -209,7 +278,7 @@ POST /auth/login
 
 성공 응답에는 사용자 정보와 access·refresh token을 반환합니다. 아이디 또는 비밀번호가 틀린 경우 어느 항목이 틀렸는지 구분하지 않고 동일한 `401 INVALID_CREDENTIALS`를 반환합니다.
 
-### 4.3 토큰 회전과 로그아웃
+### 4.4 토큰 회전과 로그아웃
 
 ```text
 POST /auth/refresh
@@ -222,7 +291,7 @@ POST /auth/logout
 }
 ```
 
-### 4.4 내 정보 조회
+### 4.5 내 정보 조회
 
 ```text
 GET /me
@@ -230,7 +299,83 @@ GET /me
 
 회원가입 때 입력한 실제 이름은 사용자 프로필의 `name`으로 유지합니다. 가족 설정 화면의 이름 편집은 이 값을 변경하지 않으며, 5.6절의 사용자별 표시 이름 API를 사용합니다.
 
-### 4.5 로그인 상태의 비밀번호 변경
+`GET /me`와 회원가입·로그인 응답의 공개 사용자 객체에는 `terms_version`, `privacy_version`, `consented_at`도 포함됩니다. 기존 호환 가입처럼 버전을 확인할 수 없으면 두 버전은 `null`입니다. `consented_at`이 존재하더라도 버전이 `null`이면 현재 공개 문서에 동의했다는 뜻이 아니므로, 재동의 화면은 반드시 다음 동의 상태 API를 기준으로 분기합니다.
+
+### 4.6 본인 동의 상태 조회와 재동의
+
+```text
+GET   /me/consents
+PATCH /me/consents
+Authorization: Bearer {access_token}
+```
+
+두 응답 모두 `Cache-Control: no-store`를 사용합니다. `GET`은 저장된 사용자 동의와 현재 정책을 비교하며 데이터를 변경하지 않습니다.
+
+```json
+{
+  "status": "legacy_unversioned",
+  "consent_required": true,
+  "can_consent": true,
+  "consented_at": "2026-08-22T03:00:00Z",
+  "terms": {
+    "agreed": true,
+    "accepted_version": null,
+    "current_version": "terms-v1",
+    "is_current": false
+  },
+  "privacy": {
+    "agreed": true,
+    "accepted_version": null,
+    "current_version": "privacy-v1",
+    "is_current": false
+  }
+}
+```
+
+| `status` | 의미 |
+|---|---|
+| `policy_not_configured` | 현재 문서 버전·시행 시각·공개 URL이 아직 설정되지 않았습니다. |
+| `policy_not_effective` | 정책은 설정됐지만 시행 시각 전입니다. |
+| `legacy_unversioned` | 정책은 시행됐지만 사용자의 두 당시 버전이 모두 확인되지 않습니다. |
+| `outdated` | 버전이 다르거나 버전·동의값·동의 시각 중 일부가 불완전합니다. |
+| `current` | 두 버전이 현재 정책과 일치하고, 두 동의값이 `true`이며 시간대가 포함된 유효 동의 시각이 있습니다. |
+
+- `consent_required`는 정책이 시행됐고 `required=true`이며 사용자가 `current`가 아닐 때 `true`입니다.
+- `can_consent`는 정책이 설정·시행됐고 사용자가 아직 `current`가 아닐 때 `true`입니다.
+- `terms.is_current`와 `privacy.is_current`는 각 문서의 버전·동의값·공통 동의 시각을 기준으로 계산합니다.
+- 재동의 필요 상태는 안내와 화면 분기용입니다. 기존 계정의 로그인, 가구·기기·LED·MQTT API와 회원 탈퇴를 서버 전역에서 차단하지 않습니다.
+
+재동의 요청:
+
+```json
+{
+  "terms_service_agreed": true,
+  "privacy_agreed": true,
+  "terms_version": "terms-v1",
+  "privacy_version": "privacy-v1"
+}
+```
+
+- 두 동의값은 모두 `true`, 두 버전은 모두 필수이며 `GET /legal/policies`가 반환한 현재 값과 정확히 일치해야 합니다.
+- 클라이언트는 동의 시각을 보내지 않습니다. 서버가 실제 처리 시각을 UTC로 기록하고 최소 동의 영수증을 저장합니다.
+- 정상 응답은 `200`과 갱신된 동의 상태입니다. 같은 버전에 대한 완전하고 유효한 동의를 다시 보내면 기존 동의 시각을 유지합니다.
+- 버전은 같지만 동의값이나 동의 시각이 불완전한 기존 레코드는 멱등 성공으로 간주하지 않고 새 서버 시각과 영수증으로 복구합니다.
+- 요청 횟수는 클라이언트 IP와 `user_id` 조합별로 15분에 10회입니다.
+
+| API | HTTP / code | 조건 |
+|---|---|---|
+| 회원가입 | `409 LEGAL_POLICY_NOT_CONFIGURED` | 정책 미설정 상태에서 버전을 하나라도 제출 |
+| 회원가입 | `409 LEGAL_POLICY_NOT_EFFECTIVE` | `required=true`인 정책의 시행 전 가입, 또는 시행 전 버전 제출 |
+| 회원가입 | `409 LEGAL_CONSENT_REQUIRED` | 시행된 `required=true` 정책에서 두 버전을 모두 생략 |
+| 회원가입 | `409 LEGAL_VERSION_MISMATCH` | 제출 버전이 일부 누락됐거나 현재 버전과 불일치 |
+| 재동의 | `409 LEGAL_POLICY_NOT_CONFIGURED` | 현재 정책 미설정 |
+| 재동의 | `409 LEGAL_POLICY_NOT_EFFECTIVE` | 현재 정책 시행 전 |
+| 재동의 | `409 LEGAL_VERSION_MISMATCH` | 제출 버전이 현재 버전과 불일치 |
+| 재동의 | `409 LEGAL_CONSENT_CONFLICT` | 동시 요청 등으로 저장 상태가 변경되어 안전하게 기록하지 못함 |
+| 재동의 | `422 VALIDATION_ERROR` | 동의값이 `true`가 아니거나 필수 필드·형식 오류 |
+| 재동의 | `429 LEGAL_CONSENT_RATE_LIMITED` | 같은 IP·사용자 조합에서 15분에 10회 초과 |
+
+### 4.7 로그인 상태의 비밀번호 변경
 
 ```text
 PATCH /me/password
@@ -243,10 +388,10 @@ PATCH /me/password
 }
 ```
 
-변경 성공 시 기존 access·refresh token을 모두 무효화하고 재로그인을 요구합니다.
+변경 성공 시 기존 access·refresh token을 모두 무효화하고 재로그인을 요구합니다. 해당 사용자의 기존 WebSocket도 종료 코드 `1008`로 닫습니다.
 로그인하지 못한 사용자의 비밀번호 찾기는 SMS 인증 수단이 확정되기 전까지 이번 명세에서 제외합니다.
 
-### 4.6 회원 탈퇴
+### 4.8 회원 탈퇴
 
 ```text
 DELETE /me
@@ -260,11 +405,16 @@ DELETE /me
 
 - access token 인증과 현재 비밀번호 재확인이 모두 필요합니다.
 - 성공 응답은 본문 없는 `204 No Content`입니다.
-- 로그인 ID, 휴대폰 alias, 사용자 프로필, refresh token과 해당 사용자가 만든·대상인 개인 표시 이름을 삭제합니다.
+- 로그인 ID, 휴대폰 alias, 사용자 프로필, refresh token, 동의 영수증, 미확인 기준과 해당 사용자가 만든·대상인 개인 표시 이름을 삭제합니다.
 - 일반 member는 본인 멤버십만 제거하며 가구는 유지합니다.
 - owner는 기존 owner 연동 해제 정책과 동일하게 가구를 비활성화하고 긴급 주소를 삭제합니다. 다른 구성원의 계정은 삭제하지 않고 미연동 상태로 전환합니다.
 - 성공 직후 기존 access·refresh token 및 로그인 정보는 사용할 수 없습니다.
 - 비밀번호가 틀리면 `409 CURRENT_PASSWORD_MISMATCH`를 반환하며 아무 데이터도 변경하지 않습니다.
+- 연결된 계정의 탈퇴는 가구 연동 해제와 최종 계정 삭제가 하나의 원자적 트랜잭션이 아닙니다. 현재 비밀번호 확인 뒤 `unlink_user`가 먼저 커밋되고 프로필·식별자·동의 영수증 삭제가 이어집니다.
+- 동의 영수증이 97개를 초과하면 최종 계정 삭제를 `409 ACCOUNT_DELETION_REVIEW_REQUIRED`로 중단합니다. 그 밖의 동시 변경은 `409 ACCOUNT_DELETION_CONFLICT`, 저장소 장애는 `5xx`가 될 수 있습니다.
+- 위 실패가 발생해도 앞선 연동 해제는 이미 반영됐을 수 있습니다. member는 `unlinked`, owner는 가구 `inactive`와 주소·초대 삭제 및 모든 member의 `unlinked` 전환까지 완료됐을 수 있습니다. 프론트는 `/me`와 `/households/current`를 다시 조회하고 관리자 지원을 안내해야 합니다. 비활성 owner 가구를 복구하는 사용자 API는 현재 없습니다.
+- 성공 시 member 본인의 WebSocket, owner이면 해당 가구의 모든 WebSocket을 `1008`로 종료합니다. 비밀번호 불일치를 제외한 저장소 실패에도 같은 범위의 연결을 보수적으로 종료하되, 성공 상태 이벤트를 임의로 보내거나 원래 HTTP 오류를 변경하지 않습니다.
+- owner 탈퇴 후 비활성 가구·기기 레코드와 보관 기한 안의 알림은 즉시 모두 삭제되지 않습니다. 이를 가구 전체의 물리 삭제 API로 해석하지 않습니다.
 
 ## 5. 가구·가족 연동 API
 
@@ -457,7 +607,9 @@ DELETE /households/current/link
 - 다른 구성원의 계정·멤버십·표시 이름을 삭제하거나 변경하지 않습니다.
 - owner를 포함해 다른 사용자의 연동을 대신 해제하는 API는 제공하지 않습니다.
 - 일반 member가 호출하면 해당 계정만 `unlinked` 상태로 돌아가며 가구는 계속 활성 상태를 유지합니다.
+- 일반 member의 해제가 성공하면 `household.member_removed` 이벤트를 보내고 본인의 WebSocket을 `1008`로 종료합니다.
 - owner가 호출하면 소유권을 다른 구성원에게 이전하지 않고 가구의 `status`를 `inactive`로 변경합니다. 가구에 연결된 모든 계정은 더 이상 해당 가구의 기기·알림 API를 사용할 수 없습니다.
+- owner의 해제가 성공하면 `household.inactivated` 이벤트를 보내고 해당 가구의 모든 WebSocket을 `1008`로 종료합니다. 저장소 실패 시에도 member 본인 또는 owner 가구 전체의 연결을 보수적으로 종료하므로, 원래 HTTP 오류를 받은 프론트는 `/me`와 `/households/current`를 재조회합니다.
 - owner의 가구 비활성화가 완료되면 `emergency_address`는 즉시 삭제합니다. 가구 자체를 영구 삭제하는 경우에도 별도 주소 레코드를 남기지 않습니다.
 - 가구 비활성화는 사용자 계정이나 기존 알림 데이터를 즉시 삭제하는 작업이 아닙니다.
 - 프론트는 owner에게 일반 연동 해제와 영향 범위가 다르다는 확인 안내를 표시해야 합니다.
@@ -696,13 +848,17 @@ PATCH /households/{household_id}/devices/{device_id}/settings
 
 ## 7. 알림 API
 
+모든 사용자용 알림 조회는 알림 발생 시각부터 `90 × 24시간`이 지나기 전인 데이터만 반환합니다. 정확히 90일이 되는 순간부터 일반 목록·최근 알림·최근 7일 이력·미확인 계산·상세 조회에서 제외하며 상세 조회는 `404 ALARM_NOT_FOUND`가 됩니다. 이 조회 차단은 DynamoDB TTL의 비동기 물리 삭제 여부와 관계없이 적용됩니다.
+
+최근 7일은 화면 이력과 미확인 계산의 범위이고, 90일은 일반 목록·최근 알림·상세 조회에도 적용되는 최대 조회·보관 기한입니다.
+
 ### 7.1 일반 알림 목록
 
 ```text
 GET /households/{household_id}/alarms?limit=100
 ```
 
-최신순 알림 목록과 실제 반환 개수인 `count`를 반환합니다. 현재 AlertHistoryPage는 날짜 묶음이 포함된 7.3절의 최근 7일 API를 사용하고, 이 API는 일반 목록이나 운영 확인이 필요할 때만 사용합니다.
+90일 보관 기한 안의 최신순 알림 목록과 실제 반환 개수인 `count`를 반환합니다. 현재 AlertHistoryPage는 날짜 묶음이 포함된 7.3절의 최근 7일 API를 사용하고, 이 API는 일반 목록이나 운영 확인이 필요할 때만 사용합니다.
 
 ### 7.2 최근 알림
 
@@ -710,7 +866,7 @@ GET /households/{household_id}/alarms?limit=100
 GET /households/{household_id}/alarms/latest
 ```
 
-알림이 없으면 `{"alarm": null}`을 반환합니다.
+90일 보관 기한 안의 가장 최근 알림을 반환합니다. 해당 알림이 없으면 `{"alarm": null}`을 반환합니다.
 
 ### 7.3 최근 7일 날짜별 알림
 
@@ -722,7 +878,7 @@ GET /households/{household_id}/alarms/history
 - 알림이 없는 날짜도 `alarms: []`로 포함합니다.
 - 날짜는 최신순, 날짜 안 알림도 최신순입니다.
 - 페이지네이션 없이 7일 범위를 한 번에 반환합니다.
-- 7일 이전 알림은 DynamoDB에서 삭제하지 않으며, ID를 알고 있으면 상세 API로 계속 조회할 수 있습니다.
+- 7일 이전 알림은 이 날짜별 응답에 포함되지 않습니다. 다만 발생 후 90일이 되기 전에는 일반 목록이나 상세 API에서 조회할 수 있습니다.
 
 ```json
 {
@@ -836,7 +992,7 @@ GET /households/{household_id}/alarms/{alarm_id}
 
 - 해당 가구에 연동된 owner와 member만 조회할 수 있습니다.
 - 다른 가구 사용자는 `403`, 존재하지 않는 알림은 `404`를 반환합니다.
-- `alarm_id`는 최근 7일 목록의 알림 객체에 포함된 `id`를 사용합니다. 과거 알림 ID를 알고 있는 경우에도 상세조회할 수 있습니다.
+- `alarm_id`는 최근 7일 목록 또는 일반 목록의 알림 객체에 포함된 `id`를 사용합니다. 과거 알림 ID를 알고 있어도 발생 후 90일이 지난 알림은 조회할 수 없습니다.
 - 프론트는 응답의 `local_time`을 한국어 오전·오후와 시각으로 표시합니다.
 
 ```json
@@ -956,6 +1112,8 @@ WebSocket의 나머지 메시지와 모든 REST 필드의 활용 의도는 다�
 
 프론트는 60초보다 짧은 간격으로 `ping`을 보내고 `pong`을 받아 연결을 유지합니다. access token 갱신 후 WebSocket도 새 token으로 다시 연결합니다.
 
+연동 해제·회원 탈퇴·비밀번호 변경 또는 인증 거부로 종료 코드 `1008`을 받으면 이전 token으로 무조건 재연결하지 않습니다. `/me`와 `/households/current`로 계정·연동 상태를 확인하고, 인증이 무효이면 재로그인한 뒤 활성 가구에 연결합니다. 서버는 연결 등록 전후에 사용자·가구 권한을 재검증합니다.
+
 ## 10. API 필드별 프론트 활용 가이드
 
 이 절은 각 필드가 단순히 무엇을 담는지를 넘어, 프론트에서 **표시·화면 분기·다음 API 호출 중 어디에 사용하는 값인지** 설명합니다.
@@ -995,6 +1153,8 @@ WebSocket의 나머지 메시지와 모든 REST 필드의 활용 의도는 다�
 | `emergency_address` | 기존 가입 화면 호환용 선택 필드입니다. 현재 권장 흐름은 가입 후 주소 온보딩이므로 가입 요청에서 생략할 수 있습니다. |
 | `terms_service_agreed` | 서비스 이용약관 동의 체크 결과이며 `true`만 허용됩니다. |
 | `privacy_agreed` | 개인정보 수집·이용 동의 체크 결과이며 `true`만 허용됩니다. |
+| `terms_version` | 선택한 약관 버전입니다. `GET /legal/policies`의 `terms.version`을 그대로 사용합니다. 기존 프론트 호환 모드에서는 생략할 수 있습니다. |
+| `privacy_version` | 선택한 개인정보 처리방침 버전입니다. `GET /legal/policies`의 `privacy.version`을 그대로 사용합니다. 기존 프론트 호환 모드에서는 생략할 수 있습니다. |
 
 #### 회원가입·로그인·`GET /me`의 사용자 필드
 
@@ -1010,6 +1170,9 @@ WebSocket의 나머지 메시지와 모든 REST 필드의 활용 의도는 다�
 | `user.household_id` / `household_id` | 연동된 가구 API 경로에 사용합니다. 미연동이면 `null`입니다. |
 | `user.role` / `role` | `owner`이면 설정 버튼을 제공하고, `member`이면 조회 중심 UI를 제공합니다. 미연동이면 `null`입니다. 백엔드의 `403` 처리도 반드시 유지합니다. |
 | `user.household_link_status` / `household_link_status` | `linked`이면 메인 화면, `unlinked`이면 초대 코드 입력 화면으로 이동시키는 기준입니다. |
+| `user.terms_version` / `terms_version` | 사용자가 마지막으로 명시적으로 동의한 약관 버전입니다. 확인되지 않은 기존 동의는 `null`입니다. |
+| `user.privacy_version` / `privacy_version` | 사용자가 마지막으로 명시적으로 동의한 개인정보 처리방침 버전입니다. 확인되지 않은 기존 동의는 `null`입니다. |
+| `user.consented_at` / `consented_at` | 마지막 동의 처리 시각입니다. 현재 정책 충족 여부는 이 값만으로 판단하지 않고 `GET /me/consents`를 사용합니다. |
 | `user.created_at` / `created_at` | 계정 생성일을 설정 화면 등에 표시할 때 사용합니다. |
 | `tokens.access_token` | 일반 API의 `Authorization: Bearer ...` 헤더와 WebSocket 최초 인증 메시지에 사용합니다. |
 | `tokens.refresh_token` | access token 갱신과 로그아웃 요청에 사용합니다. 화면에 표시하거나 로그에 남기지 않습니다. |
@@ -1027,6 +1190,22 @@ WebSocket의 나머지 메시지와 모든 REST 필드의 활용 의도는 다�
 | logout `refresh_token` | 서버에서 해당 refresh token을 폐기합니다. 성공 응답은 본문 없는 `204`이므로 프론트도 저장한 토큰을 삭제하고 로그인 화면으로 이동합니다. |
 | 비밀번호 변경 `current_password` | 현재 비밀번호 확인용 입력값입니다. |
 | 비밀번호 변경 `new_password` | 새 비밀번호 입력값입니다. 성공 응답은 `204`이며 모든 기존 토큰이 무효화되므로 재로그인합니다. |
+
+#### 약관 정책과 본인 동의 필드
+
+| 필드 | 프론트 활용 의도 |
+|---|---|
+| 정책 `configured` | `false`이면 버전 문자열을 만들어 보내지 않고 기존 호환 가입 흐름을 유지합니다. |
+| 정책 `effective` | `false`이면 해당 버전의 가입 동의·재동의를 시도하지 않습니다. |
+| 정책 `required` | 시행 후 신규 가입에서 현재 버전 제출이 필수인지 판단합니다. 기존 로그인이나 메인 기능 차단값으로 사용하지 않습니다. |
+| 정책 `effective_at` | 시행 예정 안내에 사용할 수 있는 시간대 포함 시각입니다. 미설정이면 `null`입니다. |
+| 정책 `terms.version`, `privacy.version` | 가입·재동의 요청에 그대로 복사합니다. |
+| 정책 `terms.url`, `privacy.url` | 약관과 개인정보 처리방침 원문을 여는 데 사용합니다. |
+| 동의 `status` | `policy_not_configured`, `policy_not_effective`, `legacy_unversioned`, `outdated`, `current` 중 하나로 화면 상태를 결정합니다. |
+| 동의 `consent_required` | 현재 정책이 강제 상태이고 사용자가 아직 `current`가 아니면 재동의 안내를 표시합니다. |
+| 동의 `can_consent` | 현재 서버가 재동의 요청을 받을 수 있는 상태인지 판단합니다. |
+| 동의 `consented_at` | 저장된 동의 시각입니다. 버전·동의값과 함께 해석하며 단독으로 현재 동의를 뜻하지 않습니다. |
+| 동의 `terms`, `privacy` | 각 문서의 `agreed`, `accepted_version`, `current_version`, `is_current`를 이용해 무엇이 최신이 아닌지 표시합니다. |
 
 ### 10.3 가구·가족 연동 API
 
@@ -1237,7 +1416,7 @@ WebSocket의 나머지 메시지와 모든 REST 필드의 활용 의도는 다�
 | `alarm.created.alarm` | 9절 예시의 알림 객체로 토스트·최신 알림·이력 목록에 즉시 추가하고, 같은 `alarm.id`를 아직 처리하지 않았다면 미확인 개수를 1 증가시킵니다. |
 | `household.inactivated.type` | owner 해제로 가구가 비활성화됐음을 뜻합니다. 가구 관련 캐시를 비우고 연동 안내 화면으로 이동합니다. |
 | `household.inactivated.household_id` | 비활성화된 가구가 현재 가구와 같은지 확인합니다. |
-| `household.member_removed.type` | member 탈퇴로 구성원이 제거됐음을 뜻합니다. 가족 목록을 다시 조회합니다. |
+| `household.member_removed.type` | member 연동 해제 또는 탈퇴로 구성원이 제거됐음을 뜻합니다. 가족 목록을 다시 조회합니다. |
 | `household.member_removed.user_id` | 목록에서 제거되거나 재조회될 사용자 ID입니다. |
 | 프론트→서버 `ping.type` | 연결 유지와 단절 감지를 위해 60초보다 짧은 간격으로 `ping`을 보냅니다. |
 | 서버→프론트 `pong.type` | 연결이 살아 있음을 확인합니다. |
@@ -1258,6 +1437,8 @@ WebSocket 재연결, 로그인 계정 변경 또는 페이지 새로고침 시�
 | `POST /internal/mqtt/alert` | MQTT 브리지가 분류 알림을 저장하고 WebSocket으로 전달하는 내부 API입니다. |
 | `GET /health` | 배포 상태 확인용 API입니다. 서비스 상태 점검에는 사용할 수 있지만 일반 화면 데이터 API는 아닙니다. |
 
+`GET /device/v1/config`와 `POST /device/v1/heartbeat`는 `X-Device-Credential` 헤더가 필요합니다. 두 내부 MQTT API는 `X-Internal-Token` 헤더가 필요합니다. 이 헤더 인증은 현재 OpenAPI의 security scheme에 자동 표현되지 않으므로 일반 Bearer 인증으로 대체하지 않습니다.
+
 `POST /internal/mqtt/alert`는 사용자용 응답 필드 외에도 선택적인
 `model_version`, `decision_source`, `confidence_kind`, `yamnet_family`,
 `yamnet_score`, `hearo_confidence`, `applied_threshold`, `policy_version`을
@@ -1265,13 +1446,26 @@ WebSocket 재연결, 로그인 계정 변경 또는 페이지 새로고침 시�
 분석에 사용하며, 현재 사용자용 알림 상세 화면과 WebSocket에는 노출하지
 않습니다. 해당 필드가 없는 기존 Pi 이벤트도 계속 정상 처리합니다.
 
+내부 알림의 발행·수집 기기 규칙:
+
+- `publisher_device_id`를 생략하면 `source_device_id`를 발행 기기로 사용합니다. 값을 보낼 경우 `publisher_device_id`와 `source_device_id`가 반드시 같아야 하며 다르면 `400 PUBLISHER_ID_MISMATCH`입니다.
+- 발행 기기는 해당 가구에 등록된 `hub`여야 합니다. 아니면 `400 INVALID_ALERT_PUBLISHER`입니다.
+- `capture_device_id`를 생략하면 발행 기기를 실제 수집 기기로 사용합니다. 값을 보낼 경우 해당 가구의 `hub` 또는 `alert_node`여야 하며 아니면 `400 INVALID_CAPTURE_DEVICE`입니다.
+- `location`은 기존 발행자와의 요청 호환을 위해 본문 필수 필드로 유지하지만, 저장되는 `source_device_id`와 `location`은 서버가 실제 수집 기기 레코드의 ID·위치로 다시 작성합니다. 요청 본문의 `location`은 신뢰하지 않습니다.
+- 따라서 ESP32가 수집하고 Pi가 발행한 이벤트는 `source_device_id`와 `publisher_device_id`에 Pi ID를, `capture_device_id`에 ESP32 ID를 사용합니다. `source_device_id=ESP32`, `publisher_device_id=Pi` 조합은 허용되지 않습니다.
+- 서버보다 5분을 초과한 미래 시각은 `400 INVALID_TIMESTAMP`입니다. 이미 90일이 지난 이벤트와 같은 `event_id`의 중복 이벤트는 응답 자체는 `200`일 수 있지만 저장하거나 `alarm.created` WebSocket을 발행하지 않습니다.
+
 ## 11. 프론트엔드 수정 확인 목록
 
+- 가입 화면 진입 시 `GET /legal/policies`를 조회하고, 설정·시행된 문서 URL과 서버 버전을 기준으로 동의를 받습니다.
+- 로그인 후 `GET /me/consents`의 `status`, `consent_required`, `can_consent`로 재동의 안내를 표시하고, 두 문서를 실제로 보여준 뒤 `PATCH /me/consents`를 호출합니다.
+- 재동의 필요 상태만으로 로그인·기기·가구 화면 전체를 임의 차단하지 않습니다. 중요한 변경 시 이용 제한은 별도 정책 합의가 필요합니다.
 - 모든 회원가입 화면에 별도 로그인 아이디 입력칸을 추가합니다.
 - 기기 상세에서 진동 알림과 민감도 조절을 삭제합니다.
 - LED 알림 스위치는 `led_alert_control_supported=true`인 ESP32 3대에만 표시합니다.
 - 회원 탈퇴 확인 화면에서 현재 비밀번호를 입력받아 `DELETE /me`를 호출하고, 성공 시 모든 로컬 token·가구 캐시를 삭제한 뒤 로그인 화면으로 이동합니다.
 - 알림 상세에서 녹음 재생 UI를 삭제합니다.
+- 최근 7일 이력과 90일 최대 조회 기한을 구분하며, 90일이 지나 `404 ALARM_NOT_FOUND`가 된 상세는 만료 안내로 처리합니다.
 - 구성원 이름 편집은 사용자별 표시 이름 변경으로 연결하며, 실제 회원 이름을 바꾸지 않습니다.
 - 가구 연동 해제 화면은 member에게는 본인 연결만 해제된다고 안내하고, owner에게는 가구 전체가 비활성화된다는 별도 확인 안내를 표시합니다.
 - 신규 가구 회원가입 직후의 주소 온보딩에 도로명주소 검색, 우편번호 및 상세주소 입력 UI를 추가합니다.
@@ -1282,5 +1476,6 @@ WebSocket 재연결, 로그인 계정 변경 또는 페이지 새로고침 시�
 
 1. 초대 코드 유효기간은 24시간으로 구현했습니다.
 2. 로그인하지 못한 사용자의 비밀번호 찾기는 SMS 본인 인증 정책 확정 전까지 제외합니다.
-3. 운영 EC2에는 현재 실행 중인 v1과 병렬로 v2를 배포한 뒤 프론트 smoke test 후 전환합니다.
-4. 과거 이메일 기반 샘플 core 테이블은 최종 User 모델과 호환되지 않으므로 별도 최종 테이블을 사용합니다.
+3. v2.4.0은 별도 r6 스테이징과 테스트 테이블에서 검증한 뒤 운영 서비스로 전환합니다. 구체적인 순서는 [`DEPLOYMENT_V2_4.md`](./DEPLOYMENT_V2_4.md)를 따릅니다.
+4. 실제 약관 버전·시행 시각·공개 URL과 프론트 동의 화면이 확정되기 전에는 다섯 문서 환경값을 비우고 `HEARO_LEGAL_CONSENT_REQUIRED=false`를 유지합니다.
+5. 기존 알림 테이블은 90일 조회 차단을 먼저 배포한 뒤 검토된 마이그레이션 계획, TTL과 시간당 정리 작업을 순서대로 적용합니다. 로컬 테스트만으로 운영 반영 완료를 판단하지 않습니다.
