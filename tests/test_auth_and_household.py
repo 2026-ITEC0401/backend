@@ -230,7 +230,7 @@ def test_per_viewer_display_names_and_reset(api):
     assert reset.json()["display_name"] == "가족"
 
 
-def test_member_unlink_keeps_account_and_owner_unlink_deactivates_household(api):
+def test_member_unlink_keeps_household_and_owner_unlink_destroys_owned_core_graph(api):
     owner = create_owner(api)
     family = create_family(api)
     code, linked = link_family(api, owner, family)
@@ -255,9 +255,12 @@ def test_member_unlink_keeps_account_and_owner_unlink_deactivates_household(api)
     )
     assert owner_unlink.status_code == 200
     assert owner_unlink.json()["household_status"] == "inactive"
-    household = api.repository.get_household(household_id)
-    assert household.status == "inactive"
-    assert household.emergency_address is None
+    assert api.repository.get_household(household_id) is None
+    assert not any(key[0] == household_id for key in api.repository.devices)
+    assert not any(
+        value[0] == household_id
+        for value in api.repository.device_credentials.values()
+    )
     assert api.client.get("/households/current", headers=family_headers).json()[
         "household_link_status"
     ] == "unlinked"
@@ -265,7 +268,7 @@ def test_member_unlink_keeps_account_and_owner_unlink_deactivates_household(api)
         "/device/v1/config",
         headers={"X-Device-Credential": owner["device_credentials"]["rpi-001"]},
     )
-    assert device_blocked.status_code == 403
+    assert device_blocked.status_code == 401
 
 
 def test_unlinked_user_can_delete_account_after_password_confirmation(api):
@@ -339,7 +342,7 @@ def test_linked_member_account_deletion_keeps_household_and_removes_user_data(ap
     )
 
 
-def test_owner_account_deletion_deactivates_household_and_preserves_member_account(api):
+def test_owner_account_deletion_destroys_household_core_graph_and_preserves_member_account(api):
     owner = create_owner(api)
     family = create_family(api)
     _, linked = link_family(api, owner, family)
@@ -355,8 +358,12 @@ def test_owner_account_deletion_deactivates_household_and_preserves_member_accou
     )
     assert deleted.status_code == 204
     assert api.repository.get_user(owner_id) is None
-    assert api.repository.get_household(household_id).status == "inactive"
-    assert api.repository.get_household(household_id).emergency_address is None
+    assert api.repository.get_household(household_id) is None
+    assert not any(key[0] == household_id for key in api.repository.devices)
+    assert not any(
+        value[0] == household_id
+        for value in api.repository.device_credentials.values()
+    )
 
     member = api.repository.get_user(member_id)
     assert member is not None
@@ -369,7 +376,7 @@ def test_owner_account_deletion_deactivates_household_and_preserves_member_accou
         "/device/v1/config",
         headers={"X-Device-Credential": owner["device_credentials"]["esp32_1"]},
     )
-    assert blocked_device.status_code == 403
+    assert blocked_device.status_code == 401
 
 
 def test_refresh_rotation_logout_and_logged_in_password_change(api):

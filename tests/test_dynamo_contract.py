@@ -216,67 +216,29 @@ def test_link_member_transaction_initializes_alarm_seen_at_to_link_time():
     assert membership["alarms_last_seen_at"] == membership["linked_at"]
 
 
-def test_owner_unlink_transaction_removes_address_invite_and_all_members():
-    repo = repository()
-    owner = User(
-        user_id="owner-1",
-        login_id="owner01",
-        name="보호자",
-        phone_number="+821012345678",
-        password_hash="hash",
-        account_type="household_owner",
-        household_id="home-1",
-        role="owner",
-        household_link_status="linked",
-    )
-    member = User(
-        user_id="member-1",
-        login_id="member01",
-        name="가족",
-        phone_number="+821087654321",
-        password_hash="hash",
-        account_type="family_member",
-        household_id="home-1",
-        role="member",
-        household_link_status="linked",
-    )
-    household = Household(
-        household_id="home-1",
-        name="가구",
-        owner_user_id=owner.user_id,
-        emergency_address=EmergencyAddress(
-            postal_code="41566",
-            road_address="대구광역시 북구 대학로 80",
-            detail_address="",
-            address_provider="kakao_postcode",
-        ),
-        invite_hash="invite-hash",
-    )
-    repo.get_user_consistent = lambda user_id: owner if user_id == owner.user_id else member
-    repo.get_household_consistent = lambda household_id: household
-    repo._consistent_household_members = lambda household_id: [
-        ({"linked_at": value.linked_at}, value) for value in (owner, member)
-    ]
+def test_owner_unlink_transaction_destroys_registration_but_preserves_accounts():
+    from .test_account_withdrawal_atomic import HOME, dynamo_fixture
 
+    repo, owner, members = dynamo_fixture()
     result = repo.unlink_user(owner.user_id, datetime.now(UTC))
 
     assert result == {
         "household_link_status": "unlinked",
         "household_status": "inactive",
     }
-    operations = repo.client.transactions[0]
-    household_update = operations[0]["Update"]
-    assert "REMOVE emergency_address" in household_update["UpdateExpression"]
-    assert any(
-        operation.get("Delete", {}).get("Key", {}).get("pk") == {"S": "INVITE#invite-hash"}
-        for operation in operations
+    assert len(repo.client.transactions) == 1
+    assert not any(key[0] == f"HOUSE#{HOME}" for key in repo.core.items)
+    assert not any(
+        key[0].startswith("DEVICECRED#") and item.get("household_id") == HOME
+        for key, item in repo.core.items.items()
     )
-    member_deletes = [
-        operation
-        for operation in operations
-        if operation.get("Delete", {}).get("Key", {}).get("sk", {}).get("S", "").startswith("MEMBER#")
-    ]
-    assert len(member_deletes) == 2
+    for value in (owner, *members):
+        profile = repo.core.items[(f"USER#{value.user_id}", "PROFILE")]
+        assert profile["household_link_status"] == "unlinked"
+        assert not {"household_id", "role", "linked_at"} & profile.keys()
+        assert (f"LOGINID#{value.login_id}", "USER") in repo.core.items
+        assert (f"PHONE#{value.phone_number}", "USER") in repo.core.items
+        assert (f"TOKEN#{value.user_id}-0", "REFRESH") in repo.core.items
 
 
 def test_delete_user_account_removes_identity_aliases_profile_and_user_references():
@@ -370,7 +332,31 @@ def test_put_alert_transaction_reserves_event_id_across_timestamps(monkeypatch):
 
     assert repo.put_alert(alert) is True
     operations = repo.client.transactions[0]
-    assert operations[0]["Put"]["TableName"] == "hearo-alerts-final"
-    alias = decoded_item(operations[1])
+    household = operations[0]["ConditionCheck"]
+    assert household["TableName"] == "hearo-core-final"
+    assert TypeDeserializer().deserialize(household["Key"]["pk"]) == "HOUSE#home-1"
+    assert "#status=:active" in household["ConditionExpression"]
+    assert operations[1]["Put"]["TableName"] == "hearo-alerts-final"
+    alias = decoded_item(operations[2])
     assert alias["pk"] == "ALERTID#home-1#alarm-1"
     assert alias["event_key"] == "2026-08-21T00:00:00Z#alarm-1"
+
+
+def test_device_credential_auth_reads_alias_and_device_consistently():
+    device = Device("home-auth", "esp32_1", "안방", "alert_node", credential_hash="valid-hash")
+    calls = []
+
+    class CredentialTable:
+        def get_item(self, **kwargs):
+            calls.append(kwargs)
+            if kwargs["Key"]["pk"].startswith("DEVICECRED#"):
+                return {"Item": {"household_id": "home-auth", "device_id": "esp32_1"}}
+            return {"Item": asdict(device)}
+
+    repo = repository()
+    repo.core = CredentialTable()
+    assert repo.get_device_by_credential("valid-hash") == device
+    assert len(calls) == 2
+    assert all(call["ConsistentRead"] is True for call in calls)
+    device.credential_hash = "revoked-and-replaced"
+    assert repo.get_device_by_credential("valid-hash") is None

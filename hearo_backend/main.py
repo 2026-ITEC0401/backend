@@ -336,7 +336,7 @@ def create_app(
         device = app.state.repository.get_device_by_credential(hash_secret(credential))
         if not device:
             raise _error(401, "INVALID_DEVICE_CREDENTIAL", "기기 인증 정보가 올바르지 않습니다.")
-        household = app.state.repository.get_household(device.household_id)
+        household = app.state.repository.get_household_consistent(device.household_id)
         if not household or household.status != "active":
             raise _error(403, "HOUSEHOLD_INACTIVE", "기기가 속한 가구가 비활성화되었습니다.")
         return device

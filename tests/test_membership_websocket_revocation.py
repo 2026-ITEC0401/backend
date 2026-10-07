@@ -183,11 +183,11 @@ def test_withdrawal_unknown_committed_outcome_does_not_attempt_partial_rollback(
     assert len(committed) == 1
     assert api.repository.get_user(selected["user"]["user_id"]) is None
     assert api.client.get("/me", headers=auth_header(selected)).status_code == 401
-    household = api.repository.get_household(household_id)
-    assert household.status == ("inactive" if role == "owner" else "active")
     if role == "owner":
+        assert api.repository.get_household(household_id) is None
         assert api.repository.get_user(family["user"]["user_id"]).household_link_status == "unlinked"
     else:
+        assert api.repository.get_household(household_id).status == "active"
         assert api.repository.get_user(owner["user"]["user_id"]).household_link_status == "linked"
 
 
@@ -250,7 +250,7 @@ def test_owner_unlink_unknown_outcome_closes_every_household_websocket(
             assert response.json()["code"] == "HOUSEHOLD_UNLINK_CONFLICT"
             _assert_policy_close(owner_ws)
             _assert_policy_close(member_ws)
-            assert api.repository.get_household(household_id).status == "inactive"
+            assert api.repository.get_household(household_id) is None
 
 
 def test_password_change_during_websocket_registration_is_rechecked(api, monkeypatch):

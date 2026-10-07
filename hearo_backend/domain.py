@@ -103,6 +103,9 @@ class Household:
     # Internal optimistic-concurrency fence for membership mutations. Legacy
     # household rows deserialize as zero and the value is never public.
     membership_version: int = 0
+    # Fence new household registration references during irreversible removal.
+    # Device heartbeats do not increment this counter. Legacy rows read as zero.
+    registration_version: int = 0
 
     def public(self) -> dict[str, Any]:
         # 주소와 초대 코드 메타데이터는 각각의 전용 권한 API에서만 반환합니다.
