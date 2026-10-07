@@ -95,6 +95,9 @@ class Household:
     invite_hash: str | None = None
     invite_nonce: str | None = None
     invite_expires_at: str | None = None
+    # Internal optimistic-concurrency fence for membership mutations. Legacy
+    # household rows deserialize as zero and the value is never public.
+    membership_version: int = 0
 
     def public(self) -> dict[str, Any]:
         # 주소와 초대 코드 메타데이터는 각각의 전용 권한 API에서만 반환합니다.
