@@ -3,7 +3,7 @@ from __future__ import annotations
 import unicodedata
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, field_validator, model_validator
 
 
 LOGIN_ID_PATTERN = r"^[A-Za-z0-9._-]{4,30}$"
@@ -134,6 +134,10 @@ class SignupRequest(StrictModel):
     emergency_address: EmergencyAddressRequest | None = None
     terms_service_agreed: Literal[True]
     privacy_agreed: Literal[True]
+    age_over_14_agreed: StrictBool = Field(
+        description="만 14세 이상이라는 본인의 확인. JSON true만 허용합니다.",
+        json_schema_extra={"const": True},
+    )
     terms_version: str | None = Field(default=None, min_length=1, max_length=64)
     privacy_version: str | None = Field(default=None, min_length=1, max_length=64)
 
@@ -161,6 +165,13 @@ class SignupRequest(StrictModel):
     @classmethod
     def normalize_legal_version(cls, value: str | None) -> str | None:
         return _normalize_text(value) if value is not None else None
+
+    @field_validator("age_over_14_agreed")
+    @classmethod
+    def require_age_confirmation(cls, value: bool) -> bool:
+        if value is not True:
+            raise ValueError("만 14세 이상임을 확인해야 가입할 수 있습니다.")
+        return value
 
     @model_validator(mode="after")
     def validate_signup_type_fields(self):

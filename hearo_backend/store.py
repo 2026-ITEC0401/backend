@@ -1058,6 +1058,8 @@ class DynamoRepository:
                 ":yes": True, ":old_terms": current.terms_version,
                 ":old_privacy": current.privacy_version, ":old_at": current.consented_at,
                 ":token": current.token_version,
+                ":old_age": current.age_over_14_agreed,
+                ":old_age_at": current.age_over_14_agreed_at,
             }
             token_condition = "token_version = :token"
             if current.token_version == 0:
@@ -1072,7 +1074,13 @@ class DynamoRepository:
                         "ConditionExpression": "attribute_exists(pk) AND " + token_condition
                             + " AND (attribute_not_exists(terms_version) OR terms_version=:old_terms)"
                             + " AND (attribute_not_exists(privacy_version) OR privacy_version=:old_privacy)"
-                            + " AND (attribute_not_exists(consented_at) OR consented_at=:old_at)",
+                            + " AND (attribute_not_exists(consented_at) OR consented_at=:old_at)"
+                            + " AND " + self._withdrawal_snapshot_clause(
+                                "age_over_14_agreed", ":old_age", current.age_over_14_agreed,
+                            )
+                            + " AND " + self._withdrawal_snapshot_clause(
+                                "age_over_14_agreed_at", ":old_age_at", current.age_over_14_agreed_at,
+                            ),
                         "ExpressionAttributeValues": self._ddb(values),
                     }},
                     {"Put": {
@@ -1153,6 +1161,8 @@ class DynamoRepository:
             "token_version": user.token_version, "terms_version": user.terms_version,
             "privacy_version": user.privacy_version, "consented_at": user.consented_at,
             "terms_service_agreed": user.terms_service_agreed, "privacy_agreed": user.privacy_agreed,
+            "age_over_14_agreed": user.age_over_14_agreed,
+            "age_over_14_agreed_at": user.age_over_14_agreed_at,
             "reference_version": user.reference_version,
             "login_id": user.login_id, "phone_number": user.phone_number,
         }
@@ -1475,6 +1485,8 @@ class DynamoRepository:
             "consented_at": user.consented_at,
             "terms_service_agreed": user.terms_service_agreed,
             "privacy_agreed": user.privacy_agreed,
+            "age_over_14_agreed": user.age_over_14_agreed,
+            "age_over_14_agreed_at": user.age_over_14_agreed_at,
             "login_id": user.login_id,
             "phone_number": user.phone_number,
             "account_type": user.account_type,

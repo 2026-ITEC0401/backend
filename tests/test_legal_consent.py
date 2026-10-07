@@ -64,6 +64,7 @@ def owner_signup_payload(**overrides):
         "household_name": "법률동의 가구",
         "terms_service_agreed": True,
         "privacy_agreed": True,
+        "age_over_14_agreed": True,
     }
     payload.update(overrides)
     return payload
@@ -205,6 +206,8 @@ def test_patch_repairs_incomplete_or_invalid_current_version_consent(
     with running_api(legal_settings(), repository) as api:
         owner = create_owner(api)
         user_id = owner["user"]["user_id"]
+        initial_receipts = list(repository.legal_consents[user_id])
+        assert len(initial_receipts) == 1
         corrupted = repository.get_user(user_id)
         corrupted.terms_version = TERMS_VERSION
         corrupted.privacy_version = PRIVACY_VERSION
@@ -231,7 +234,12 @@ def test_patch_repairs_incomplete_or_invalid_current_version_consent(
         stored = repository.get_user(user_id)
         assert stored.terms_service_agreed is True
         assert stored.privacy_agreed is True
-        assert len(repository.legal_consents[user_id]) == 1
+        assert len(repository.legal_consents[user_id]) == 2
+        assert repository.legal_consents[user_id][0] == initial_receipts[0]
+        repaired_receipt = repository.legal_consents[user_id][1]
+        assert repaired_receipt["terms_version"] == TERMS_VERSION
+        assert repaired_receipt["privacy_version"] == PRIVACY_VERSION
+        assert repaired_receipt["consented_at"] == stored.consented_at
 
 
 def test_required_active_policy_requires_both_current_versions_at_signup():

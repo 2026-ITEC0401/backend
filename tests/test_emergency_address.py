@@ -23,6 +23,7 @@ def owner_signup_payload(**overrides):
         "emergency_address": address_payload(),
         "terms_service_agreed": True,
         "privacy_agreed": True,
+        "age_over_14_agreed": True,
     }
     value.update(overrides)
     return value
@@ -161,6 +162,7 @@ def test_family_signup_rejects_household_address(api):
         "emergency_address": address_payload(),
         "terms_service_agreed": True,
         "privacy_agreed": True,
+        "age_over_14_agreed": True,
     }
     response = api.client.post("/auth/signup", json=payload)
     assert response.status_code == 422

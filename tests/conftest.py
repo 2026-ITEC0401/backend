@@ -58,6 +58,7 @@ def create_owner(
             },
             "terms_service_agreed": True,
             "privacy_agreed": True,
+            "age_over_14_agreed": True,
         },
     )
     assert response.status_code == 201, response.text
@@ -81,6 +82,7 @@ def create_family(
             "signup_type": "family_member",
             "terms_service_agreed": True,
             "privacy_agreed": True,
+            "age_over_14_agreed": True,
         },
     )
     assert response.status_code == 201, response.text

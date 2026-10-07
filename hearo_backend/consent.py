@@ -228,6 +228,11 @@ def consent_status(
         "consent_required": bool(policy.required and can_consent),
         "can_consent": can_consent,
         "consented_at": user.consented_at,
+        # Legal reconsent must not silently manufacture or update signup age proof.
+        "age_over_14": {
+            "agreed": user.age_over_14_agreed,
+            "agreed_at": user.age_over_14_agreed_at,
+        },
         "terms": {
             "agreed": user.terms_service_agreed,
             "accepted_version": user.terms_version,

@@ -9,7 +9,7 @@
 ## 1. 서비스 규칙
 
 - 로그인에는 `login_id`와 비밀번호를 사용합니다.
-- 회원가입 필수 정보는 로그인 아이디, 이름, 휴대폰 번호, 비밀번호입니다.
+- 회원가입 필수 정보는 로그인 아이디, 이름, 휴대폰 번호, 비밀번호와 만 14세 이상 자가 확인입니다. 연령 확인은 체크박스 진술이며 생년월일·신분증으로 실제 나이를 검증하는 기능은 아닙니다.
 - `신규 가구 등록` 사용자는 가구를 생성하고 `owner`가 됩니다.
 - 신규 가구 owner는 주소 없이 가입할 수 있으며, 가입 후 스킵 불가 주소 온보딩을 진행합니다. 주소는 사용자 프로필이 아닌 가구에 저장합니다.
 - `가족·보호자로 참여` 사용자는 먼저 미연동 계정으로 가입하며, 초대 코드는 가입 직후 또는 설정에서 입력할 수 있습니다.
@@ -67,6 +67,7 @@ Authorization: Bearer {access_token}
 | `verified` | 서버가 행안부 응답으로 판정하는 읽기 전용 값. 클라이언트 전송 금지 |
 | `terms_version` | 최대 64자. `GET /legal/policies`가 반환한 현재 약관 버전을 그대로 사용 |
 | `privacy_version` | 최대 64자. `GET /legal/policies`가 반환한 현재 개인정보 처리방침 버전을 그대로 사용 |
+| `age_over_14_agreed` | 회원가입 전용 필수 값. 형 변환 없이 JSON boolean `true`만 허용 |
 
 회원가입 화면에는 별도 로그인 아이디 입력칸이 필요합니다. 현재 와이어프레임에 없다면 프론트 화면을 추가 수정해야 합니다.
 
@@ -197,6 +198,7 @@ POST /auth/signup
   "household_name": "홍길동 가구",
   "terms_service_agreed": true,
   "privacy_agreed": true,
+  "age_over_14_agreed": true,
   "terms_version": "terms-v1",
   "privacy_version": "privacy-v1"
 }
@@ -213,6 +215,7 @@ POST /auth/signup
   "signup_type": "family_member",
   "terms_service_agreed": true,
   "privacy_agreed": true,
+  "age_over_14_agreed": true,
   "terms_version": "terms-v1",
   "privacy_version": "privacy-v1"
 }
@@ -220,15 +223,18 @@ POST /auth/signup
 
 위 버전 문자열은 형식 예시입니다. 실제 요청은 `GET /legal/policies`가 반환한 값을 그대로 사용합니다.
 
-가입 동의 호환 규칙:
+가입 동의·연령 확인 규칙:
 
 - `terms_service_agreed`와 `privacy_agreed`는 기존과 같이 항상 `true`여야 합니다.
-- `terms_version`과 `privacy_version`은 기존 프론트 호환을 위해 스키마상 선택 필드이며 둘 다 최대 64자입니다.
+- `age_over_14_agreed`는 owner와 family member 가입 모두에 필수이며 실제 JSON boolean `true`만 허용합니다. 누락, `false`, `null`, 숫자 `0`·`1`, 문자열 `"true"`·`"false"`는 모두 `422 VALIDATION_ERROR`이며 `field_errors.age_over_14_agreed`에 표시됩니다. 요청 모델 검증에서 거부되므로 사용자·가구·별칭·멤버십·동의 영수증을 만들지 않습니다.
+- `terms_version`과 `privacy_version`은 문서 미설정·비강제 호환 모드를 위해 스키마상 선택 필드이며 둘 다 최대 64자입니다. 이는 연령 확인 필드까지 생략할 수 있다는 뜻이 아닙니다.
 - `required=false`이면 문서가 설정·시행된 뒤에도 두 버전을 모두 생략할 수 있습니다. 이 경우 두 버전은 `null`로 저장하며 서버가 최신 버전을 임의 배정하지 않습니다.
 - 버전을 하나라도 제출하면 정책이 설정되고 시행된 상태여야 하며 두 값 모두 현재 버전과 정확히 일치해야 합니다.
 - `required=true`이고 시행 전이면 버전 제출 여부와 관계없이 가입을 `409 LEGAL_POLICY_NOT_EFFECTIVE`로 거부합니다.
 - `required=true`이고 시행 후인데 두 버전을 모두 생략하면 `409 LEGAL_CONSENT_REQUIRED`, 일부만 제출하거나 현재 버전과 다르면 `409 LEGAL_VERSION_MISMATCH`를 반환합니다.
 - 정책 미설정 상태에서 버전을 임의 제출하면 `409 LEGAL_POLICY_NOT_CONFIGURED`를 반환합니다.
+- 가입 성공 시 세 확인값의 실제 수락 시각은 하나의 서버 UTC 시각으로 기록되어 `consented_at`과 `age_over_14_agreed_at`이 같습니다. 문서 버전이 모두 `null`인 호환 모드에서도 세 확인값을 담은 변경 불가 동의 영수증을 생성하지만, `null` 버전은 현재 공개 약관·처리방침 동의의 증거가 아닙니다.
+- 이 필드는 기존 가입 클라이언트와 양방향 호환되지 않습니다. 새 백엔드는 필드를 보내지 않는 구 프론트를 `422`로 거부하고, 추가 필드를 금지하는 구 백엔드는 새 프론트 요청을 `422`로 거부하므로 프론트와 백엔드를 같은 전환 창에 배포해야 합니다.
 
 - `emergency_address`는 `new_household` 가입에서 선택 항목입니다. 기존 클라이언트가 주소를 함께 보내는 요청도 계속 허용하지만 서버 검증 전이므로 `verified=false`로 저장합니다.
 - `family_member` 가입에는 주소를 입력하지 않고, 가구 연동 후 해당 가구 주소를 사용합니다.
@@ -250,6 +256,8 @@ POST /auth/signup
     "terms_version": "terms-v1",
     "privacy_version": "privacy-v1",
     "consented_at": "2026-10-07T03:00:00Z",
+    "age_over_14_agreed": true,
+    "age_over_14_agreed_at": "2026-10-07T03:00:00Z",
     "created_at": "2026-10-07T03:00:00Z"
   },
   "tokens": {
@@ -299,7 +307,7 @@ GET /me
 
 회원가입 때 입력한 실제 이름은 사용자 프로필의 `name`으로 유지합니다. 가족 설정 화면의 이름 편집은 이 값을 변경하지 않으며, 5.6절의 사용자별 표시 이름 API를 사용합니다.
 
-`GET /me`와 회원가입·로그인 응답의 공개 사용자 객체에는 `terms_version`, `privacy_version`, `consented_at`도 포함됩니다. 기존 호환 가입처럼 버전을 확인할 수 없으면 두 버전은 `null`입니다. `consented_at`이 존재하더라도 버전이 `null`이면 현재 공개 문서에 동의했다는 뜻이 아니므로, 재동의 화면은 반드시 다음 동의 상태 API를 기준으로 분기합니다.
+`GET /me`와 회원가입·로그인 응답의 공개 사용자 객체에는 `terms_version`, `privacy_version`, `consented_at`, `age_over_14_agreed`, `age_over_14_agreed_at`도 포함됩니다. 기존 사용자가 연령 확인 필드를 갖고 있지 않으면 두 연령 필드는 `null`이며, 로그인이나 기존 기능을 차단하거나 `true`로 일괄 보정하지 않습니다. 기존 호환 가입처럼 문서 버전을 확인할 수 없으면 두 버전은 `null`입니다. `consented_at`이 존재하더라도 버전이 `null`이면 현재 공개 문서에 동의했다는 뜻이 아니므로, 재동의 화면은 반드시 다음 동의 상태 API를 기준으로 분기합니다.
 
 ### 4.6 본인 동의 상태 조회와 재동의
 
@@ -328,6 +336,10 @@ Authorization: Bearer {access_token}
     "accepted_version": null,
     "current_version": "privacy-v1",
     "is_current": false
+  },
+  "age_over_14": {
+    "agreed": null,
+    "agreed_at": null
   }
 }
 ```
@@ -343,6 +355,7 @@ Authorization: Bearer {access_token}
 - `consent_required`는 정책이 시행됐고 `required=true`이며 사용자가 `current`가 아닐 때 `true`입니다.
 - `can_consent`는 정책이 설정·시행됐고 사용자가 아직 `current`가 아닐 때 `true`입니다.
 - `terms.is_current`와 `privacy.is_current`는 각 문서의 버전·동의값·공통 동의 시각을 기준으로 계산합니다.
+- `age_over_14`는 가입 시 저장된 자가 확인과 최초 확인 시각을 그대로 보여 줍니다. 기존 사용자처럼 기록이 없으면 두 값은 `null`이며, 이 블록은 문서 버전 기반 `status`, `consent_required`, `can_consent` 계산에 참여하지 않습니다.
 - 재동의 필요 상태는 안내와 화면 분기용입니다. 기존 계정의 로그인, 가구·기기·LED·MQTT API와 회원 탈퇴를 서버 전역에서 차단하지 않습니다.
 
 재동의 요청:
@@ -357,6 +370,7 @@ Authorization: Bearer {access_token}
 ```
 
 - 두 동의값은 모두 `true`, 두 버전은 모두 필수이며 `GET /legal/policies`가 반환한 현재 값과 정확히 일치해야 합니다.
+- PATCH 요청은 연령 확인 필드를 받지 않습니다. `age_over_14_agreed` 또는 `age_over_14_agreed_at`을 보내면 추가 필드 검증으로 `422`이며, 정상 재동의는 기존 연령 확인값과 최초 시각을 바꾸지 않습니다.
 - 클라이언트는 동의 시각을 보내지 않습니다. 서버가 실제 처리 시각을 UTC로 기록하고 최소 동의 영수증을 저장합니다.
 - 정상 응답은 `200`과 갱신된 동의 상태입니다. 같은 버전에 대한 완전하고 유효한 동의를 다시 보내면 기존 동의 시각을 유지합니다.
 - 버전은 같지만 동의값이나 동의 시각이 불완전한 기존 레코드는 멱등 성공으로 간주하지 않고 새 서버 시각과 영수증으로 복구합니다.
@@ -368,6 +382,7 @@ Authorization: Bearer {access_token}
 | 회원가입 | `409 LEGAL_POLICY_NOT_EFFECTIVE` | `required=true`인 정책의 시행 전 가입, 또는 시행 전 버전 제출 |
 | 회원가입 | `409 LEGAL_CONSENT_REQUIRED` | 시행된 `required=true` 정책에서 두 버전을 모두 생략 |
 | 회원가입 | `409 LEGAL_VERSION_MISMATCH` | 제출 버전이 일부 누락됐거나 현재 버전과 불일치 |
+| 회원가입 | `422 VALIDATION_ERROR` | `age_over_14_agreed`가 누락됐거나 JSON boolean `true`가 아님. 사용자·가구·영수증 생성 없음 |
 | 재동의 | `409 LEGAL_POLICY_NOT_CONFIGURED` | 현재 정책 미설정 |
 | 재동의 | `409 LEGAL_POLICY_NOT_EFFECTIVE` | 현재 정책 시행 전 |
 | 재동의 | `409 LEGAL_VERSION_MISMATCH` | 제출 버전이 현재 버전과 불일치 |
@@ -1158,8 +1173,9 @@ WebSocket의 나머지 메시지와 모든 REST 필드의 활용 의도는 다�
 | `emergency_address` | 기존 가입 화면 호환용 선택 필드입니다. 현재 권장 흐름은 가입 후 주소 온보딩이므로 가입 요청에서 생략할 수 있습니다. |
 | `terms_service_agreed` | 서비스 이용약관 동의 체크 결과이며 `true`만 허용됩니다. |
 | `privacy_agreed` | 개인정보 수집·이용 동의 체크 결과이며 `true`만 허용됩니다. |
-| `terms_version` | 선택한 약관 버전입니다. `GET /legal/policies`의 `terms.version`을 그대로 사용합니다. 기존 프론트 호환 모드에서는 생략할 수 있습니다. |
-| `privacy_version` | 선택한 개인정보 처리방침 버전입니다. `GET /legal/policies`의 `privacy.version`을 그대로 사용합니다. 기존 프론트 호환 모드에서는 생략할 수 있습니다. |
+| `age_over_14_agreed` | 만 14세 이상 자가 확인 체크 결과입니다. 실제 JSON boolean `true`만 보내며 누락·거짓·문자열·숫자는 모두 `422`입니다. 실제 나이 검증값으로 사용하지 않습니다. |
+| `terms_version` | 선택한 약관 버전입니다. `GET /legal/policies`의 `terms.version`을 그대로 사용합니다. 문서 버전 `null` 호환 모드에서는 생략할 수 있습니다. |
+| `privacy_version` | 선택한 개인정보 처리방침 버전입니다. `GET /legal/policies`의 `privacy.version`을 그대로 사용합니다. 문서 버전 `null` 호환 모드에서는 생략할 수 있습니다. |
 
 #### 회원가입·로그인·`GET /me`의 사용자 필드
 
@@ -1178,6 +1194,8 @@ WebSocket의 나머지 메시지와 모든 REST 필드의 활용 의도는 다�
 | `user.terms_version` / `terms_version` | 사용자가 마지막으로 명시적으로 동의한 약관 버전입니다. 확인되지 않은 기존 동의는 `null`입니다. |
 | `user.privacy_version` / `privacy_version` | 사용자가 마지막으로 명시적으로 동의한 개인정보 처리방침 버전입니다. 확인되지 않은 기존 동의는 `null`입니다. |
 | `user.consented_at` / `consented_at` | 마지막 동의 처리 시각입니다. 현재 정책 충족 여부는 이 값만으로 판단하지 않고 `GET /me/consents`를 사용합니다. |
+| `user.age_over_14_agreed` / `age_over_14_agreed` | 가입 시 만 14세 이상이라고 자가 확인한 값입니다. 신규 가입은 `true`, 기록이 없는 기존 사용자는 `null`입니다. |
+| `user.age_over_14_agreed_at` / `age_over_14_agreed_at` | 최초 연령 자가 확인의 서버 UTC 시각입니다. 기록이 없는 기존 사용자는 `null`이며 재동의 PATCH로 바뀌지 않습니다. |
 | `user.created_at` / `created_at` | 계정 생성일을 설정 화면 등에 표시할 때 사용합니다. |
 | `tokens.access_token` | 일반 API의 `Authorization: Bearer ...` 헤더와 WebSocket 최초 인증 메시지에 사용합니다. |
 | `tokens.refresh_token` | access token 갱신과 로그아웃 요청에 사용합니다. 화면에 표시하거나 로그에 남기지 않습니다. |
@@ -1211,6 +1229,7 @@ WebSocket의 나머지 메시지와 모든 REST 필드의 활용 의도는 다�
 | 동의 `can_consent` | 현재 서버가 재동의 요청을 받을 수 있는 상태인지 판단합니다. |
 | 동의 `consented_at` | 저장된 동의 시각입니다. 버전·동의값과 함께 해석하며 단독으로 현재 동의를 뜻하지 않습니다. |
 | 동의 `terms`, `privacy` | 각 문서의 `agreed`, `accepted_version`, `current_version`, `is_current`를 이용해 무엇이 최신이 아닌지 표시합니다. |
+| 동의 `age_over_14` | 가입 시 자가 확인의 `agreed`, `agreed_at`을 표시합니다. 기존 사용자는 둘 다 `null`일 수 있으며 문서 재동의 상태 계산이나 로그인 차단 기준으로 사용하지 않습니다. |
 
 ### 10.3 가구·가족 연동 API
 
@@ -1463,6 +1482,8 @@ WebSocket 재연결, 로그인 계정 변경 또는 페이지 새로고침 시�
 ## 11. 프론트엔드 수정 확인 목록
 
 - 가입 화면 진입 시 `GET /legal/policies`를 조회하고, 설정·시행된 문서 URL과 서버 버전을 기준으로 동의를 받습니다.
+- owner와 family member 가입 화면 모두에서 만 14세 이상 자가 확인을 별도로 받고, 체크된 경우에만 `age_over_14_agreed: true`를 실제 boolean으로 보냅니다. 생년월일 확인이 없는 자가 진술임을 화면 문구에서도 과장하지 않습니다.
+- 신규·구 프론트와 백엔드의 가입 요청은 서로 `422`가 되므로 가입 UI와 백엔드를 같은 전환 창에 바꾸고, 전환 중에는 가입을 일시 중지합니다.
 - 로그인 후 `GET /me/consents`의 `status`, `consent_required`, `can_consent`로 재동의 안내를 표시하고, 두 문서를 실제로 보여준 뒤 `PATCH /me/consents`를 호출합니다.
 - 재동의 필요 상태만으로 로그인·기기·가구 화면 전체를 임의 차단하지 않습니다. 중요한 변경 시 이용 제한은 별도 정책 합의가 필요합니다.
 - 모든 회원가입 화면에 별도 로그인 아이디 입력칸을 추가합니다.
@@ -1486,3 +1507,4 @@ WebSocket 재연결, 로그인 계정 변경 또는 페이지 새로고침 시�
 4. 실제 약관 버전·시행 시각·공개 URL과 프론트 동의 화면이 확정되기 전에는 다섯 문서 환경값을 비우고 `HEARO_LEGAL_CONSENT_REQUIRED=false`를 유지합니다.
 5. 기존 알림 테이블은 90일 조회 차단을 먼저 배포한 뒤 검토된 마이그레이션 계획, TTL과 시간당 정리 작업을 순서대로 적용합니다. 로컬 테스트만으로 운영 반영 완료를 판단하지 않습니다.
 6. 연결 계정 탈퇴의 원자성과 용량·실패 경계는 격리된 실제 DynamoDB에서 검증해야 합니다. `membership_version`을 모르는 구버전 API와 수정된 API를 같은 테이블의 writer로 동시에 실행하지 않습니다.
+7. 만 14세 이상 자가 확인이 포함된 새 가입 계약은 새 병합 SHA로 별도 검증 산출물을 만든 뒤 프론트와 동기화해 배포합니다. 기존 승인 SHA나 EC2 검증 스크립트를 현장에서 수정해 재사용하지 않습니다.
