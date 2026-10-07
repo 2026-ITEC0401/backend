@@ -1,0 +1,13 @@
+[Unit]
+Description=Run Hearo expired alert retention maintenance hourly
+
+# DEPLOYMENT GATE: do not enable this timer until the migration, backup,
+# production target validation, manual purge preview, and rollback checks pass.
+[Timer]
+OnCalendar=hourly
+RandomizedDelaySec=5min
+Persistent=true
+Unit=hearo-alert-retention.service
+
+[Install]
+WantedBy=timers.target

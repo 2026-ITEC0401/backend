@@ -47,7 +47,7 @@ class AccountDeletionTable:
         self.deleted_keys: list[dict] = []
         self.scan_calls = 0
 
-    def get_item(self, *, Key):
+    def get_item(self, *, Key, **kwargs):
         if Key == {"pk": f"USER#{self.user.user_id}", "sk": "PROFILE"}:
             return {"Item": asdict(self.user)}
         return {}
@@ -63,6 +63,10 @@ class AccountDeletionTable:
 
     def delete_item(self, *, Key):
         self.deleted_keys.append(Key)
+
+    def query(self, **kwargs):
+        assert kwargs["ConsistentRead"] is True
+        return {"Items": []}
 
 
 def repository() -> DynamoRepository:
@@ -289,15 +293,14 @@ def test_delete_user_account_removes_identity_aliases_profile_and_user_reference
     repo.delete_user_account(user.user_id)
 
     assert table.scan_calls == 1
-    assert table.deleted_keys == [
-        {"pk": "TOKEN#refresh-hash", "sk": "REFRESH"},
-        {"pk": "HOUSE#home-old", "sk": "ALIAS#member-1#owner-1"},
-    ]
+    assert table.deleted_keys == []  # Final cleanup is atomic with identity deletion.
     deleted = [decoded_key(operation) for operation in repo.client.transactions[0]]
     assert deleted == [
         {"pk": "LOGINID#member01", "sk": "USER"},
         {"pk": "PHONE#+821087654321", "sk": "USER"},
         {"pk": "USER#member-1", "sk": "PROFILE"},
+        {"pk": "HOUSE#home-old", "sk": "ALIAS#member-1#owner-1"},
+        {"pk": "TOKEN#refresh-hash", "sk": "REFRESH"},
     ]
 
 
@@ -348,10 +351,11 @@ def test_legacy_stored_address_without_verified_field_defaults_to_false():
     assert decoded.emergency_address.verified is False
 
 
-def test_put_alert_transaction_reserves_event_id_across_timestamps():
+def test_put_alert_transaction_reserves_event_id_across_timestamps(monkeypatch):
     from hearo_backend.domain import Alert
 
     repo = repository()
+    monkeypatch.setattr("hearo_backend.retention.utc_now", lambda: datetime(2026, 8, 22, tzinfo=UTC))
     alert = Alert(
         household_id="home-1",
         event_id="alarm-1",

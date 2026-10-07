@@ -116,10 +116,12 @@ def test_internal_mqtt_alert_is_idempotent_and_appears_in_latest(api):
     assert alarm_events[0]["alarm"]["type"] == "Visitor"
 
 
-def test_alarm_detail_is_household_scoped_and_returns_kst_fields(api):
+def test_alarm_detail_is_household_scoped_and_returns_kst_fields(api, monkeypatch):
     owner = create_owner(api)
     household_id = owner["user"]["household_id"]
     occurred_at = datetime(2026, 8, 20, 23, 47, tzinfo=UTC)
+    # The fixed timezone example must not expire merely because CI runs later.
+    monkeypatch.setattr("hearo_backend.retention.utc_now", lambda: occurred_at + timedelta(days=1))
     api.repository.put_alert(alert(household_id, "detail-alert-001", occurred_at))
 
     response = api.client.get(

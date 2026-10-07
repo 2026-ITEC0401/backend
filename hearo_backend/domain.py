@@ -43,7 +43,13 @@ class User:
     terms_service_agreed: bool = False
     privacy_agreed: bool = False
     consented_at: str | None = None
+    # Unknown legacy versions stay null; a deployment must not invent consent.
+    terms_version: str | None = None
+    privacy_version: str | None = None
     token_version: int = 0
+    # Internal fence for records that reference this user. It is deliberately
+    # independent from token_version and is not part of the public profile.
+    reference_version: int = 0
     created_at: str = field(default_factory=iso_utc)
 
     def public(self) -> dict[str, Any]:
@@ -56,6 +62,9 @@ class User:
             "household_id": self.household_id,
             "role": self.role,
             "household_link_status": self.household_link_status,
+            "terms_version": self.terms_version,
+            "privacy_version": self.privacy_version,
+            "consented_at": self.consented_at,
             "created_at": self.created_at,
         }
 
@@ -159,6 +168,8 @@ class Alert:
     hearo_confidence: float | None = None
     applied_threshold: float | None = None
     policy_version: str | None = None
+    # Internal TTL field; the public alarm/WebSocket contract is unchanged.
+    expires_at_epoch: int | None = None
 
     @property
     def event_key(self) -> str:

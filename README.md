@@ -1,10 +1,14 @@
-# Hearo 백엔드 v2
+# Hearo 백엔드 v2.4.0
 
-구현 기준일은 2026-10-03입니다. v2.3.0은 v2.2.0의 최근 7일 미확인 알림 기능에 더해 ESP32 전용 LED 알림 설정과 로그인 사용자의 회원 탈퇴 API를 제공합니다. Pi 분류 이벤트의 선택적 `model_version`을 내부 알림 계약에 저장하며, 도로명주소 검색과 상세주소 조회는 각각 별도로 발급받은 승인키를 사용합니다. EC2 반영 전에는 아래 테스트와 배포 문서의 smoke test를 다시 수행해야 합니다.
+구현 기준일은 2026-10-07입니다. v2.4.0은 기존 최근 7일 이력·미확인, ESP32 LED·회원 탈퇴 기능을 유지하면서 알림의 90일 만료 처리와 문서 버전별 명시적 동의 API를 추가합니다. 문서는 아직 공개 전이므로 실제 시행일·버전·URL이 확정되기 전에는 기존 가입 호환 모드를 사용합니다. 이 저장소의 구현 완료가 EC2 배포 완료를 의미하지는 않습니다.
 
 - API 계약과 프론트 필드 활용 사전: [`docs/API_SPEC_V2_DRAFT.md`](./docs/API_SPEC_V2_DRAFT.md) 10절
 - 기존 샘플과의 차이: [`docs/API_SPEC_V2_SAMPLE_GAP.md`](./docs/API_SPEC_V2_SAMPLE_GAP.md)
-- 배포와 롤백: [`docs/DEPLOYMENT.md`](./docs/DEPLOYMENT.md)
+- 최신 배포와 롤백: [`docs/DEPLOYMENT_V2_4.md`](./docs/DEPLOYMENT_V2_4.md)
+- 이전 v2.3.0 배포 기록: [`docs/DEPLOYMENT.md`](./docs/DEPLOYMENT.md)
+- v2.4.0 정책·프론트 계약: [`docs/PRIVACY_RETENTION_V2_4.md`](./docs/PRIVACY_RETENTION_V2_4.md)
+- v2.4.0 단계별 배포·마이그레이션 주의사항: [`docs/DEPLOYMENT_V2_4.md`](./docs/DEPLOYMENT_V2_4.md)
+- 키트 등록 설계 초안(미구현·미배포, v2.4.0 미포함): [`docs/DEVICE_KIT_API_SPEC.md`](./docs/DEVICE_KIT_API_SPEC.md)
 
 ## 구현된 기능
 
@@ -23,6 +27,8 @@
 - 가구별 WebSocket 기기 상태와 `type`·`raw_label`을 포함한 신규 알림 전달
 - 보호자 연락처, device credential, MQTT 수집기
 - 공통 오류 응답과 로그인·초대 코드 요청 제한
+- 발생 시각부터 90일 TTL, 만료 알림 조회 차단, 백업 포함 미리보기·조건부 정리 도구
+- 공개 문서 조회, 본인 동의 상태·명시적 재동의, 기존 회원의 미확인 버전 null 유지
 
 진동, 민감도, 녹음 재생, 세탁 완료 알림, 이메일/SES 비밀번호 재설정은 최종 범위에 포함하지 않습니다.
 
@@ -36,11 +42,19 @@
 | `hearo_backend/juso.py` | 행안부 도로명·상세주소 검색 클라이언트 |
 | `hearo_backend/store.py` | 메모리 개발 저장소와 DynamoDB 운영 저장소 |
 | `hearo_backend/mqtt_bridge.py` | MQTT 상태·알림을 내부 API로 전달 |
+| `hearo_backend/consent.py`, `legal_storage.py` | 문서 버전별 동의 상태·동의 영수증 |
+| `hearo_backend/retention.py` | 발생 시각부터 90일 만료 판정 |
+| `scripts/alert_retention.py` | 기존 알림 미리보기·조건부 마이그레이션·만료 정리 |
 | `infra/aws-v2.yaml` | 최종 core·alerts 테이블과 EC2 최소 권한 역할 |
-| `infra/systemd/hearo-api-v2-final.service` | 기존 v1 옆의 8001 병렬 배포 예시 |
+| `infra/systemd/hearo-api-v2-r6.service` | v2.4.0 r6 API 운영 예시(8001) |
+| `infra/systemd/hearo-mqtt-bridge-v2-r6.service` | v2.4.0 r6 MQTT Bridge 운영 예시 |
+| `infra/systemd/hearo-api-v2-r6-staging.service` | 운영과 분리한 r6 스테이징 예시(8002) |
 | `infra/nginx/hearo-api-v2-location.conf` | HTTPS `/v2/` 프록시 예시 |
+| `.github/workflows/backend-tests.yml` | GitHub PR·main 변경 시 단위 테스트와 문법 검사 |
 | `tests/` | 인증, 가구, 주소, 기기, WebSocket, 알림, Dynamo 계약 테스트 |
 | `legacy/` | v2 이전 SQLite API와 AWS 대시보드 API 보존본 |
+
+기존 `infra/systemd/*-v2-final.service` 두 파일은 r4 역사 예시입니다. v2.4.0 배포에는 사용하지 마십시오. r6 템플릿을 기존 운영의 final 서비스 이름으로 설치하는 절차는 최신 배포 안내에 따릅니다.
 
 ## 저장소 구조
 
@@ -75,7 +89,11 @@ python -m uvicorn dashboard_api_v2:app --reload --port 8001
 curl http://127.0.0.1:8001/health
 ```
 
-Swagger UI는 `http://127.0.0.1:8001/docs`에서 확인합니다. 정상 기준은 전체 테스트 통과와 `{"status":"ok","version":"2.3.0"}` 응답입니다.
+Swagger UI는 `http://127.0.0.1:8001/docs`에서 확인합니다. 정상 기준은 전체 테스트 통과와 `{"status":"ok","version":"2.4.0"}` 응답입니다.
+
+GitHub CI와 로컬 테스트는 실제 AWS·EC2·ESP32·Raspberry Pi·프론트 통합 시험을 대신하지 않습니다. 키트 등록 경로는 아직 OpenAPI에 없으며 별도 릴리스로 구현해야 합니다.
+
+연동 계정의 탈퇴가 도중에 실패해도 선행 가구 연동 해제가 반영될 수 있는 알려진 제한이 있습니다. owner 가구 비활성화 등 실패 시 복구 대책을 검증하기 전에는 운영 전환하지 않습니다. 자세한 내용은 [저장·탈퇴 무결성](./docs/PRIVACY_RETENTION_V2_4.md#5-저장탈퇴-무결성)을 참고하십시오.
 
 ## 운영 데이터 주의사항
 
@@ -89,7 +107,7 @@ Sort key: event_key = UTC timestamp#event_id
 GSI: alarm_lookup_key = household_id#event_id
 ```
 
-7일 이력은 KST 범위를 UTC로 변환해 DynamoDB `Query`로 읽고 `Scan`을 사용하지 않습니다. 7일 이전 알림은 삭제하지 않으며 알림 상세 API로 계속 조회할 수 있습니다.
+7일 이력은 KST 범위를 UTC로 변환해 DynamoDB `Query`로 읽고 `Scan`을 사용하지 않습니다. 7일 이전이라도 90일이 지나지 않은 알림은 상세 API에서 조회할 수 있으나, 90일 만료된 데이터는 모든 조회에서 제외합니다. 물리 삭제에는 TTL 및 검증 후 활성화하는 정리 도구를 사용합니다.
 
 사용자별 알림 확인 시각은 core 테이블의 `HOUSE#{household_id}` / `MEMBER#{user_id}` 관계 레코드에 `alarms_last_seen_at`으로 저장합니다. 개별 알림에는 사용자별 `read` 필드를 추가하지 않습니다.
 

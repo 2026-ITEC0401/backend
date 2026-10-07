@@ -1,0 +1,25 @@
+# Managed Hearo replacement template for /etc/logrotate.d/nginx.
+#
+# Back up and reconcile the host's existing nginx file before installation.
+# Do not install this as a second file while another stanza owns
+# /var/log/nginx/*.log. The standard nginx pre/post-rotation hooks below must
+# be retained when reconciling host-specific changes.
+/var/log/nginx/*.log {
+    daily
+    missingok
+    rotate 90
+    maxage 90
+    compress
+    delaycompress
+    notifempty
+    create 0640 www-data adm
+    sharedscripts
+    prerotate
+        if [ -d /etc/logrotate.d/httpd-prerotate ]; then
+            run-parts /etc/logrotate.d/httpd-prerotate
+        fi
+    endscript
+    postrotate
+        invoke-rc.d nginx rotate >/dev/null 2>&1
+    endscript
+}

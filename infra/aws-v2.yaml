@@ -45,6 +45,9 @@ Resources:
         SSEEnabled: true
       PointInTimeRecoverySpecification:
         PointInTimeRecoveryEnabled: true
+      TimeToLiveSpecification:
+        AttributeName: expires_at_epoch
+        Enabled: true
       AttributeDefinitions:
         - AttributeName: household_id
           AttributeType: S
@@ -87,6 +90,7 @@ Resources:
                   - dynamodb:BatchGetItem
                   - dynamodb:ConditionCheckItem
                   - dynamodb:DeleteItem
+                  - dynamodb:DescribeTable
                   - dynamodb:GetItem
                   - dynamodb:PutItem
                   - dynamodb:Query

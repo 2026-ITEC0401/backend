@@ -1,0 +1,19 @@
+[Unit]
+Description=Hearo FastAPI v2.4.0 staging
+After=network-online.target
+Wants=network-online.target
+
+# Do not enable at boot. Verify port 8002 and isolated staging table names first.
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/opt/hearo-backend-v2-r6
+EnvironmentFile=/etc/hearo/hearo-api-v2-r6-staging.env
+ExecStart=/opt/hearo-backend-v2-r6/.venv/bin/python -m uvicorn dashboard_api_v2:app --host 127.0.0.1 --port 8002 --workers 1 --proxy-headers --root-path /v2
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true

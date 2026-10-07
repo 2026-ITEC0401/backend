@@ -1,6 +1,6 @@
 # Hearo 백엔드 v2 배포 및 롤백
 
-이 문서는 현재 검증한 EC2 병렬 배포 구조에 v2.3.0 변경을 반영하는 절차를 기준으로 합니다.
+이 문서는 과거 v2.3.0 배포 기록용 절차입니다. 현재 v2.4.0 적용에는 [새 배포 안내](DEPLOYMENT_V2_4.md)를 사용합니다. 아래 r5/r4 명령을 v2.4.0에 그대로 실행하지 않습니다.
 
 ```text
 Nginx HTTPS /v2/
@@ -129,7 +129,7 @@ sudo systemctl enable --now hearo-mqtt-bridge-v2-final
 
 ## 7. 롤백
 
-최종 API가 시작되지 않거나 health check에 실패하면 최종 서비스를 먼저 중지하고 백업한 환경파일과 systemd 설정을 복원한 뒤 기존 r4 코드를 다시 시작합니다. v2.3.0은 새 DynamoDB 필드를 추가하지 않으므로 API 코드·systemd 작업 경로와 IAM 정책을 이전 상태로 복원하면 됩니다.
+아래는 v2.3.0에서 r4로 되돌리던 과거 절차입니다. v2.4.0은 알림 TTL과 동의 버전을 추가하므로 이 절차를 그대로 사용하지 않습니다. 90일 정책 공개 후에는 이전 API가 만료 알림을 다시 노출하거나 신규 TTL을 누락할 수 있어, 새 배포 안내의 롤백 제한을 먼저 확인해야 합니다.
 
 ```bash
 sudo systemctl stop hearo-mqtt-bridge-v2-final
