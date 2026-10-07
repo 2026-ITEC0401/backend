@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import threading
 import uuid
 from dataclasses import MISSING, asdict, fields, replace
@@ -158,14 +159,16 @@ class MemoryRepository:
             return updated
 
     def get_user(self, user_id: str) -> User | None:
-        return self.users.get(user_id)
+        with self._lock:
+            return self.users.get(user_id)
 
     def get_user_consistent(self, user_id: str) -> User | None:
         return self.get_user(user_id)
 
     def get_user_by_login_id(self, login_id: str) -> User | None:
-        user_id = self.users_by_login_id.get(login_id)
-        return self.users.get(user_id) if user_id else None
+        with self._lock:
+            user_id = self.users_by_login_id.get(login_id)
+            return self.users.get(user_id) if user_id else None
 
     def update_user_password(self, user_id: str, password_hash: str) -> User:
         with self._lock:
@@ -210,8 +213,202 @@ class MemoryRepository:
             self.users.pop(user_id, None)
             self.legal_consents.pop(user_id, None)
 
+    def withdraw_user_account(
+        self,
+        user_id: str,
+        now: datetime,
+        *,
+        expected_password_hash: str,
+    ) -> dict[str, Any]:
+        """Atomically apply membership effects and remove a user in memory."""
+        with self._lock:
+            user = self.users.get(user_id)
+            if user is None:
+                raise NotFoundError("사용자를 찾을 수 없습니다.")
+            if user.password_hash != expected_password_hash:
+                raise ConflictError(
+                    "계정 상태가 변경되어 삭제를 완료하지 못했습니다.",
+                    code="ACCOUNT_DELETION_CONFLICT",
+                )
+
+            previous_household_id = user.household_id
+            household_status: str | None = None
+            household: Household | None = None
+            linked_members: list[User] = []
+            if user.household_link_status == "linked":
+                if not previous_household_id or user.role not in {"owner", "member"}:
+                    self._raise_account_deletion_review_required()
+                household = self.households.get(previous_household_id)
+                member_ids = self.members.get(previous_household_id)
+                if (
+                    household is None
+                    or household.status != "active"
+                    or not isinstance(household.membership_version, int)
+                    or isinstance(household.membership_version, bool)
+                    or household.membership_version < 0
+                    or member_ids is None
+                ):
+                    self._raise_account_deletion_review_required()
+                if user_id not in member_ids:
+                    self._raise_account_deletion_review_required()
+                if user.role == "owner" and household.owner_user_id != user_id:
+                    self._raise_account_deletion_review_required()
+                if user.role == "member" and household.owner_user_id == user_id:
+                    self._raise_account_deletion_review_required()
+                for member_id in sorted(member_ids):
+                    member = self.users.get(member_id)
+                    if (
+                        member is None
+                        or member.household_id != previous_household_id
+                        or member.household_link_status != "linked"
+                        or member.role not in {"owner", "member"}
+                        or (member_id == household.owner_user_id) != (member.role == "owner")
+                        or (member.role == "owner")
+                        != (member.account_type == "household_owner")
+                    ):
+                        self._raise_account_deletion_review_required()
+                    linked_members.append(member)
+                if not any(member.user_id == household.owner_user_id for member in linked_members):
+                    self._raise_account_deletion_review_required()
+                household_status = "inactive" if user.role == "owner" else "active"
+            elif user.household_link_status != "unlinked":
+                self._raise_account_deletion_review_required()
+            elif (
+                user.household_id is not None
+                or user.role is not None
+                or user.linked_at is not None
+                or any(user_id in member_ids for member_ids in self.members.values())
+            ):
+                self._raise_account_deletion_review_required()
+
+            reference_count = sum(
+                value.get("user_id") == user_id for value in self.refresh_tokens.values()
+            ) + sum(
+                viewer_id == user_id or member_id == user_id
+                for _, viewer_id, member_id in self.display_names
+            )
+            action_count = 3 + reference_count + len(self.legal_consents.get(user_id, []))
+            if household is not None:
+                action_count += 2  # HOUSE metadata plus the withdrawing MEMBER row.
+                if user.role == "owner":
+                    action_count += len(linked_members) - 1
+                    action_count += len(linked_members) - 1
+                    if household.invite_hash:
+                        action_count += 1
+            if action_count > 100:
+                self._raise_account_deletion_review_required()
+
+            dictionary_names = [
+                "users",
+                "users_by_login_id",
+                "users_by_phone",
+                "households",
+                "members",
+                "display_names",
+                "invites",
+                "refresh_tokens",
+                "alarm_last_seen",
+                "legal_consents",
+            ]
+            snapshot = {
+                name: copy.deepcopy(getattr(self, name)) for name in dictionary_names
+            }
+            original_users = dict(self.users)
+            original_households = dict(self.households)
+            # Mutate detached dataclass copies while holding the lock. A caller
+            # that retained an earlier object reference therefore observes
+            # either the old state (until commit) or the committed state, never
+            # a rollback-only intermediate unlink.
+            working_user_ids = (
+                [member.user_id for member in linked_members]
+                if household is not None and user.role == "owner"
+                else [user_id]
+            )
+            working_users = {
+                member_id: copy.deepcopy(original_users[member_id])
+                for member_id in working_user_ids
+            }
+            self.users.update(working_users)
+            user = working_users[user_id]
+            if household is not None and previous_household_id is not None:
+                household = copy.deepcopy(original_households[previous_household_id])
+                self.households[previous_household_id] = household
+                if user.role == "owner":
+                    linked_members = [
+                        working_users[member.user_id] for member in linked_members
+                    ]
+            try:
+                if household is not None:
+                    household.membership_version += 1
+                    if user.role == "owner":
+                        household.status = "inactive"
+                        household.inactive_at = iso_utc(now)
+                        household.emergency_address = None
+                        if household.invite_hash:
+                            self.invites.pop(household.invite_hash, None)
+                        household.invite_hash = None
+                        household.invite_nonce = None
+                        household.invite_expires_at = None
+                        for member in linked_members:
+                            self.alarm_last_seen.pop(
+                                (previous_household_id, member.user_id), None
+                            )
+                            member.household_id = None
+                            member.role = None
+                            member.household_link_status = "unlinked"
+                            member.linked_at = None
+                        self.members[previous_household_id] = set()
+                    else:
+                        self.members[previous_household_id].discard(user_id)
+                        self.alarm_last_seen.pop((previous_household_id, user_id), None)
+                        user.household_id = None
+                        user.role = None
+                        user.household_link_status = "unlinked"
+                        user.linked_at = None
+                self.delete_user_account(user_id)
+            except Exception:
+                for name in dictionary_names:
+                    current = getattr(self, name)
+                    current.clear()
+                    if name == "users":
+                        current.update(original_users)
+                    elif name == "households":
+                        current.update(original_households)
+                    else:
+                        current.update(snapshot[name])
+                raise
+            # Publish committed fields to any object references handed out
+            # before the transaction, while still under the same lock.
+            for member_id, working in working_users.items():
+                original = original_users[member_id]
+                for item_field in fields(User):
+                    setattr(original, item_field.name, getattr(working, item_field.name))
+                if member_id in self.users:
+                    self.users[member_id] = original
+            if household is not None and previous_household_id is not None:
+                original_household = original_households[previous_household_id]
+                for item_field in fields(Household):
+                    setattr(
+                        original_household,
+                        item_field.name,
+                        getattr(household, item_field.name),
+                    )
+                self.households[previous_household_id] = original_household
+            return {
+                "previous_household_id": previous_household_id,
+                "household_status": household_status,
+            }
+
+    @staticmethod
+    def _raise_account_deletion_review_required() -> None:
+        raise ConflictError(
+            "관련 기록을 자동으로 검증할 수 없어 관리자 확인이 필요합니다.",
+            code="ACCOUNT_DELETION_REVIEW_REQUIRED",
+        )
+
     def get_household(self, household_id: str) -> Household | None:
-        return self.households.get(household_id)
+        with self._lock:
+            return self.households.get(household_id)
 
     def get_household_consistent(self, household_id: str) -> Household | None:
         return self.get_household(household_id)
@@ -227,12 +424,17 @@ class MemoryRepository:
             return address
 
     def list_members(self, household_id: str) -> list[User]:
-        return [self.users[user_id] for user_id in sorted(self.members.get(household_id, set()))]
+        with self._lock:
+            return [
+                self.users[user_id]
+                for user_id in sorted(self.members.get(household_id, set()))
+            ]
 
     def get_display_name(
         self, household_id: str, viewer_user_id: str, member_user_id: str
     ) -> str | None:
-        return self.display_names.get((household_id, viewer_user_id, member_user_id))
+        with self._lock:
+            return self.display_names.get((household_id, viewer_user_id, member_user_id))
 
     def set_display_name(
         self,
@@ -264,12 +466,14 @@ class MemoryRepository:
     def delete_display_name(
         self, household_id: str, viewer_user_id: str, member_user_id: str
     ) -> None:
-        if member_user_id not in self.members.get(household_id, set()):
-            raise NotFoundError("가족 구성원을 찾을 수 없습니다.")
-        self.display_names.pop((household_id, viewer_user_id, member_user_id), None)
+        with self._lock:
+            if member_user_id not in self.members.get(household_id, set()):
+                raise NotFoundError("가족 구성원을 찾을 수 없습니다.")
+            self.display_names.pop((household_id, viewer_user_id, member_user_id), None)
 
     def member_count(self, household_id: str) -> int:
-        return len(self.members.get(household_id, set()))
+        with self._lock:
+            return len(self.members.get(household_id, set()))
 
     def link_member(
         self, user_id: str, invite_hash: str, now: datetime
@@ -296,6 +500,7 @@ class MemoryRepository:
             user.linked_at = iso_utc(now)
             self.members.setdefault(household.household_id, set()).add(user.user_id)
             self.alarm_last_seen[(household.household_id, user.user_id)] = user.linked_at
+            household.membership_version += 1
             return user
 
     def get_or_initialize_alarm_last_seen(
@@ -345,8 +550,9 @@ class MemoryRepository:
             return household
 
     def get_invite(self, invite_hash: str) -> dict[str, Any] | None:
-        value = self.invites.get(invite_hash)
-        return dict(value) if value else None
+        with self._lock:
+            value = self.invites.get(invite_hash)
+            return dict(value) if value else None
 
     def unlink_user(self, user_id: str, now: datetime) -> dict[str, Any]:
         with self._lock:
@@ -358,6 +564,7 @@ class MemoryRepository:
             if not household or household.status != "active":
                 raise ConflictError("활성 가구를 찾을 수 없습니다.", code="HOUSEHOLD_INACTIVE")
             if user.role == "owner":
+                household.membership_version += 1
                 household.status = "inactive"
                 household.inactive_at = iso_utc(now)
                 household.emergency_address = None
@@ -376,6 +583,7 @@ class MemoryRepository:
                     member.linked_at = None
                 self.members[household_id] = set()
                 return {"household_link_status": "unlinked", "household_status": "inactive"}
+            household.membership_version += 1
             self.members.get(household_id, set()).discard(user.user_id)
             self.alarm_last_seen.pop((household_id, user.user_id), None)
             user.household_id = None
@@ -1034,6 +1242,406 @@ class DynamoRepository:
                 code="ACCOUNT_DELETION_CONFLICT",
             ) from exc
 
+    @staticmethod
+    def _raise_withdrawal_review_required() -> None:
+        raise ConflictError(
+            "관련 기록을 자동으로 검증할 수 없어 관리자 확인이 필요합니다.",
+            code="ACCOUNT_DELETION_REVIEW_REQUIRED",
+        )
+
+    @staticmethod
+    def _withdrawal_snapshot_clause(
+        field: str,
+        placeholder: str,
+        value: Any,
+        *,
+        legacy_zero: bool = False,
+        legacy_false: bool = False,
+        legacy_unlinked: bool = False,
+    ) -> str:
+        if (
+            value is None
+            or (legacy_zero and value == 0)
+            or (legacy_false and value is False)
+            or (legacy_unlinked and value == "unlinked")
+        ):
+            return f"(attribute_not_exists({field}) OR {field}={placeholder})"
+        return f"{field}={placeholder}"
+
+    def _withdrawal_reference_keys(
+        self, user_id: str
+    ) -> tuple[set[tuple[str, str]], set[tuple[str, str]]]:
+        from boto3.dynamodb.conditions import Attr, Key
+
+        reference_filter = (
+            (Attr("pk").begins_with("TOKEN#") & Attr("user_id").eq(user_id))
+            | Attr("viewer_user_id").eq(user_id)
+            | Attr("member_user_id").eq(user_id)
+            | Attr("sk").eq(f"MEMBER#{user_id}")
+        )
+        scan_arguments: dict[str, Any] = {
+            "FilterExpression": reference_filter,
+            "ProjectionExpression": "pk, sk",
+            "ConsistentRead": True,
+        }
+        keys: set[tuple[str, str]] = set()
+        membership_keys: set[tuple[str, str]] = set()
+        while True:
+            response = self.core.scan(**scan_arguments)
+            for item in response.get("Items", []):
+                pk, sk = item.get("pk"), item.get("sk")
+                if not isinstance(pk, str) or not pk or not isinstance(sk, str) or not sk:
+                    self._raise_withdrawal_review_required()
+                if pk.startswith("HOUSE#") and sk == f"MEMBER#{user_id}":
+                    membership_keys.add((pk, sk))
+                elif not (
+                    pk.startswith("TOKEN#")
+                    or (pk.startswith("HOUSE#") and sk.startswith("ALIAS#"))
+                ):
+                    self._raise_withdrawal_review_required()
+                else:
+                    keys.add((pk, sk))
+            last_key = response.get("LastEvaluatedKey")
+            if not last_key:
+                break
+            scan_arguments["ExclusiveStartKey"] = last_key
+
+        consent_query: dict[str, Any] = {
+            "KeyConditionExpression": Key("pk").eq(f"USER#{user_id}")
+            & Key("sk").begins_with("CONSENT#"),
+            "ProjectionExpression": "pk, sk",
+            "ConsistentRead": True,
+        }
+        while True:
+            response = self.core.query(**consent_query)
+            for item in response.get("Items", []):
+                pk, sk = item.get("pk"), item.get("sk")
+                if (
+                    pk != f"USER#{user_id}"
+                    or not isinstance(sk, str)
+                    or not sk.startswith("CONSENT#")
+                ):
+                    self._raise_withdrawal_review_required()
+                keys.add((pk, sk))
+            last_key = response.get("LastEvaluatedKey")
+            if not last_key:
+                break
+            consent_query["ExclusiveStartKey"] = last_key
+        return keys, membership_keys
+
+    def _consistent_household_members(
+        self, household_id: str
+    ) -> list[tuple[dict[str, Any], User]]:
+        from boto3.dynamodb.conditions import Key
+
+        query_arguments: dict[str, Any] = {
+            "KeyConditionExpression": Key("pk").eq(f"HOUSE#{household_id}")
+            & Key("sk").begins_with("MEMBER#"),
+            "ProjectionExpression": "pk, sk, user_id, linked_at",
+            "ConsistentRead": True,
+        }
+        membership_items: list[dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+        while True:
+            response = self.core.query(**query_arguments)
+            for raw_item in response.get("Items", []):
+                item = _plain(raw_item)
+                pk, sk, member_id = item.get("pk"), item.get("sk"), item.get("user_id")
+                if (
+                    pk != f"HOUSE#{household_id}"
+                    or not isinstance(member_id, str)
+                    or not member_id
+                    or sk != f"MEMBER#{member_id}"
+                    or (pk, sk) in seen
+                    or not isinstance(item.get("linked_at"), str)
+                ):
+                    self._raise_withdrawal_review_required()
+                seen.add((pk, sk))
+                membership_items.append(item)
+            last_key = response.get("LastEvaluatedKey")
+            if not last_key:
+                break
+            query_arguments["ExclusiveStartKey"] = last_key
+
+        members: list[tuple[dict[str, Any], User]] = []
+        for item in sorted(membership_items, key=lambda value: value["user_id"]):
+            member = self.get_user_consistent(item["user_id"])
+            if (
+                member is None
+                or member.household_id != household_id
+                or member.household_link_status != "linked"
+                or member.role not in {"owner", "member"}
+                or member.linked_at != item["linked_at"]
+                or (member.role == "owner")
+                != (member.account_type == "household_owner")
+            ):
+                self._raise_withdrawal_review_required()
+            members.append((item, member))
+        return members
+
+    def withdraw_user_account(
+        self,
+        user_id: str,
+        now: datetime,
+        *,
+        expected_password_hash: str,
+    ) -> dict[str, Any]:
+        """Delete an identity and any membership effects in one DynamoDB transaction."""
+        user = self.get_user_consistent(user_id)
+        if user is None:
+            raise NotFoundError("사용자를 찾을 수 없습니다.")
+        if user.password_hash != expected_password_hash:
+            raise ConflictError(
+                "계정 상태가 변경되어 삭제를 완료하지 못했습니다.",
+                code="ACCOUNT_DELETION_CONFLICT",
+            )
+
+        previous_household_id = user.household_id
+        household_status: str | None = None
+        household: Household | None = None
+        membership_rows: list[tuple[dict[str, Any], User]] = []
+        if user.household_link_status == "linked":
+            if not previous_household_id or user.role not in {"owner", "member"}:
+                self._raise_withdrawal_review_required()
+            household = self.get_household_consistent(previous_household_id)
+            if (
+                household is None
+                or household.status != "active"
+                or not isinstance(household.membership_version, int)
+                or isinstance(household.membership_version, bool)
+                or household.membership_version < 0
+            ):
+                self._raise_withdrawal_review_required()
+            membership_rows = self._consistent_household_members(previous_household_id)
+            member_by_id = {member.user_id: member for _, member in membership_rows}
+            if (
+                user_id not in member_by_id
+                or household.owner_user_id not in member_by_id
+                or member_by_id[household.owner_user_id].role != "owner"
+                or any(
+                    (member.user_id == household.owner_user_id) != (member.role == "owner")
+                    for _, member in membership_rows
+                )
+                or (user.role == "owner") != (household.owner_user_id == user_id)
+            ):
+                self._raise_withdrawal_review_required()
+            household_status = "inactive" if user.role == "owner" else "active"
+        elif user.household_link_status != "unlinked":
+            self._raise_withdrawal_review_required()
+
+        # All discovery is complete before constructing or issuing a write.
+        reference_keys, membership_reference_keys = self._withdrawal_reference_keys(user_id)
+        if household is None:
+            if (
+                user.household_id is not None
+                or user.role is not None
+                or user.linked_at is not None
+                or membership_reference_keys
+            ):
+                self._raise_withdrawal_review_required()
+        elif membership_reference_keys != {
+            (f"HOUSE#{previous_household_id}", f"MEMBER#{user_id}")
+        }:
+            self._raise_withdrawal_review_required()
+        operations: list[dict[str, Any]] = []
+        operation_keys: set[tuple[str, str]] = set()
+
+        def add_operation(pk: str, sk: str, operation: dict[str, Any]) -> None:
+            identity = (pk, sk)
+            if identity in operation_keys:
+                self._raise_withdrawal_review_required()
+            operation_keys.add(identity)
+            operations.append(operation)
+
+        identity_values = self._ddb({":deleting_user": user_id})
+        for pk in (f"LOGINID#{user.login_id}", f"PHONE#{user.phone_number}"):
+            add_operation(pk, "USER", {"Delete": {
+                "TableName": self.settings.core_table,
+                "Key": self._ddb({"pk": pk, "sk": "USER"}),
+                "ConditionExpression": "user_id=:deleting_user",
+                "ExpressionAttributeValues": identity_values,
+            }})
+
+        profile_fields = {
+            "password_hash": expected_password_hash,
+            "token_version": user.token_version,
+            "reference_version": user.reference_version,
+            "household_link_status": user.household_link_status,
+            "household_id": user.household_id,
+            "#role": user.role,
+            "linked_at": user.linked_at,
+            "terms_version": user.terms_version,
+            "privacy_version": user.privacy_version,
+            "consented_at": user.consented_at,
+            "terms_service_agreed": user.terms_service_agreed,
+            "privacy_agreed": user.privacy_agreed,
+            "login_id": user.login_id,
+            "phone_number": user.phone_number,
+            "account_type": user.account_type,
+        }
+        profile_values: dict[str, Any] = {}
+        profile_conditions = ["attribute_exists(pk)"]
+        for field, value in profile_fields.items():
+            field_name = "role" if field == "#role" else field
+            placeholder = f":profile_{field_name}"
+            profile_values[placeholder] = value
+            profile_conditions.append(self._withdrawal_snapshot_clause(
+                field,
+                placeholder,
+                value,
+                legacy_zero=field_name in {"token_version", "reference_version"},
+                legacy_false=field_name in {"terms_service_agreed", "privacy_agreed"},
+                legacy_unlinked=field_name == "household_link_status",
+            ))
+        add_operation(f"USER#{user_id}", "PROFILE", {"Delete": {
+            "TableName": self.settings.core_table,
+            "Key": self._ddb({"pk": f"USER#{user_id}", "sk": "PROFILE"}),
+            "ConditionExpression": " AND ".join(profile_conditions),
+            "ExpressionAttributeNames": {"#role": "role"},
+            "ExpressionAttributeValues": self._ddb(profile_values),
+        }})
+
+        for pk, sk in sorted(reference_keys):
+            delete: dict[str, Any] = {
+                "TableName": self.settings.core_table,
+                "Key": self._ddb({"pk": pk, "sk": sk}),
+            }
+            if pk.startswith("TOKEN#"):
+                delete.update(
+                    ConditionExpression="user_id=:deleting_user",
+                    ExpressionAttributeValues=identity_values,
+                )
+            elif sk.startswith("ALIAS#"):
+                delete.update(
+                    ConditionExpression=(
+                        "(viewer_user_id=:deleting_user OR member_user_id=:deleting_user)"
+                    ),
+                    ExpressionAttributeValues=identity_values,
+                )
+            add_operation(pk, sk, {"Delete": delete})
+
+        if household is not None and previous_household_id is not None:
+            house_values: dict[str, Any] = {
+                ":active": "active",
+                ":owner": household.owner_user_id,
+                ":current_membership_version": household.membership_version,
+                ":next_membership_version": household.membership_version + 1,
+            }
+            house_conditions = [
+                "#status=:active",
+                "owner_user_id=:owner",
+                self._withdrawal_snapshot_clause(
+                    "membership_version",
+                    ":current_membership_version",
+                    household.membership_version,
+                    legacy_zero=True,
+                ),
+            ]
+            if user.role == "owner":
+                house_snapshot = {
+                    "invite_hash": household.invite_hash,
+                    "invite_nonce": household.invite_nonce,
+                    "invite_expires_at": household.invite_expires_at,
+                    "emergency_address": (
+                        asdict(household.emergency_address)
+                        if household.emergency_address is not None
+                        else None
+                    ),
+                }
+                for field, value in house_snapshot.items():
+                    placeholder = f":house_{field}"
+                    house_values[placeholder] = value
+                    house_conditions.append(
+                        self._withdrawal_snapshot_clause(field, placeholder, value)
+                    )
+                house_values.update({":inactive": "inactive", ":inactive_at": iso_utc(now)})
+                update_expression = (
+                    "SET #status=:inactive, inactive_at=:inactive_at, "
+                    "membership_version=:next_membership_version "
+                    "REMOVE emergency_address, invite_hash, invite_nonce, invite_expires_at"
+                )
+            else:
+                update_expression = "SET membership_version=:next_membership_version"
+            add_operation(f"HOUSE#{previous_household_id}", "META", {"Update": {
+                "TableName": self.settings.core_table,
+                "Key": self._ddb({"pk": f"HOUSE#{previous_household_id}", "sk": "META"}),
+                "UpdateExpression": update_expression,
+                "ConditionExpression": " AND ".join(house_conditions),
+                "ExpressionAttributeNames": {"#status": "status"},
+                "ExpressionAttributeValues": self._ddb(house_values),
+            }})
+
+            if user.role == "owner" and household.invite_hash:
+                invite_values = self._ddb({":household_id": previous_household_id})
+                add_operation(f"INVITE#{household.invite_hash}", "INVITE", {"Delete": {
+                    "TableName": self.settings.core_table,
+                    "Key": self._ddb({
+                        "pk": f"INVITE#{household.invite_hash}", "sk": "INVITE",
+                    }),
+                    "ConditionExpression": "household_id=:household_id",
+                    "ExpressionAttributeValues": invite_values,
+                }})
+
+            for membership_item, member in membership_rows:
+                if user.role != "owner" and member.user_id != user_id:
+                    continue
+                member_values = {
+                    ":member_id": member.user_id,
+                    ":member_linked_at": membership_item["linked_at"],
+                }
+                add_operation(
+                    f"HOUSE#{previous_household_id}",
+                    f"MEMBER#{member.user_id}",
+                    {"Delete": {
+                        "TableName": self.settings.core_table,
+                        "Key": self._ddb({
+                            "pk": f"HOUSE#{previous_household_id}",
+                            "sk": f"MEMBER#{member.user_id}",
+                        }),
+                        "ConditionExpression": "user_id=:member_id AND linked_at=:member_linked_at",
+                        "ExpressionAttributeValues": self._ddb(member_values),
+                    }},
+                )
+                if user.role == "owner" and member.user_id != user_id:
+                    linked_values = self._ddb({
+                        ":household_id": previous_household_id,
+                        ":linked": "linked",
+                        ":member_role": "member",
+                        ":member_linked_at": member.linked_at,
+                        ":unlinked": "unlinked",
+                    })
+                    add_operation(f"USER#{member.user_id}", "PROFILE", {"Update": {
+                        "TableName": self.settings.core_table,
+                        "Key": self._ddb({
+                            "pk": f"USER#{member.user_id}", "sk": "PROFILE",
+                        }),
+                        "UpdateExpression": (
+                            "SET household_link_status=:unlinked "
+                            "REMOVE household_id, #role, linked_at"
+                        ),
+                        "ConditionExpression": (
+                            "attribute_exists(pk) AND household_id=:household_id AND "
+                            "household_link_status=:linked AND #role=:member_role AND "
+                            "linked_at=:member_linked_at"
+                        ),
+                        "ExpressionAttributeNames": {"#role": "role"},
+                        "ExpressionAttributeValues": linked_values,
+                    }})
+
+        if len(operations) > 100:
+            self._raise_withdrawal_review_required()
+        try:
+            self.client.transact_write_items(TransactItems=operations)
+        except Exception as exc:
+            raise ConflictError(
+                "계정 상태가 변경되어 삭제를 완료하지 못했습니다.",
+                code="ACCOUNT_DELETION_CONFLICT",
+            ) from exc
+        return {
+            "previous_household_id": previous_household_id,
+            "household_status": household_status,
+        }
+
     def get_household(self, household_id: str) -> Household | None:
         item = self.core.get_item(Key={"pk": f"HOUSE#{household_id}", "sk": "META"}).get("Item")
         return self._household(item)
@@ -1169,13 +1777,14 @@ class DynamoRepository:
                         }
                     },
                     {
-                        "ConditionCheck": {
+                        "Update": {
                             "TableName": self.settings.core_table,
                             "Key": self._ddb({"pk": f"HOUSE#{household_id}", "sk": "META"}),
+                            "UpdateExpression": "ADD membership_version :one",
                             "ConditionExpression": "#status=:active AND invite_hash=:hash",
                             "ExpressionAttributeNames": {"#status": "status"},
                             "ExpressionAttributeValues": self._ddb(
-                                {":active": "active", ":hash": invite_hash}
+                                {":active": "active", ":hash": invite_hash, ":one": 1}
                             ),
                         }
                     },
@@ -1345,16 +1954,36 @@ class DynamoRepository:
         return self.core.get_item(Key={"pk": f"INVITE#{invite_hash}", "sk": "INVITE"}).get("Item")
 
     def unlink_user(self, user_id: str, now: datetime) -> dict[str, Any]:
-        user = self.get_user(user_id)
+        user = self.get_user_consistent(user_id)
         if not user or user.household_link_status != "linked" or not user.household_id:
             raise ConflictError("가구에 연동되어 있지 않습니다.", code="HOUSEHOLD_LINK_REQUIRED")
         household_id = user.household_id
-        household = self.get_household(household_id)
+        household = self.get_household_consistent(household_id)
         if not household or household.status != "active":
             raise ConflictError("활성 가구를 찾을 수 없습니다.", code="HOUSEHOLD_INACTIVE")
+        if (
+            not isinstance(household.membership_version, int)
+            or isinstance(household.membership_version, bool)
+            or household.membership_version < 0
+        ):
+            self._raise_withdrawal_review_required()
         if user.role != "owner":
             self.client.transact_write_items(
                 TransactItems=[
+                    {
+                        "Update": {
+                            "TableName": self.settings.core_table,
+                            "Key": self._ddb({"pk": f"HOUSE#{household_id}", "sk": "META"}),
+                            "UpdateExpression": "ADD membership_version :one",
+                            "ConditionExpression": "#status=:active AND owner_user_id=:owner",
+                            "ExpressionAttributeNames": {"#status": "status"},
+                            "ExpressionAttributeValues": self._ddb({
+                                ":one": 1,
+                                ":active": "active",
+                                ":owner": household.owner_user_id,
+                            }),
+                        }
+                    },
                     {
                         "Update": {
                             "TableName": self.settings.core_table,
@@ -1380,13 +2009,27 @@ class DynamoRepository:
                             "Key": self._ddb(
                                 {"pk": f"HOUSE#{household_id}", "sk": f"MEMBER#{user_id}"}
                             ),
+                            "ConditionExpression": "user_id=:user",
+                            "ExpressionAttributeValues": self._ddb({":user": user_id}),
                         }
                     },
                 ]
             )
             return {"household_link_status": "unlinked", "household_status": "active"}
 
-        members = self.list_members(household_id)
+        membership_rows = self._consistent_household_members(household_id)
+        members = [member for _, member in membership_rows]
+        member_by_id = {member.user_id: member for member in members}
+        if (
+            household.owner_user_id != user_id
+            or user_id not in member_by_id
+            or member_by_id[user_id].role != "owner"
+            or any(
+                (member.user_id == household.owner_user_id) != (member.role == "owner")
+                for member in members
+            )
+        ):
+            self._raise_withdrawal_review_required()
         if len(members) > 48:
             raise ConflictError("가구 구성원이 너무 많아 비활성화를 한 번에 처리할 수 없습니다.")
         operations: list[dict[str, Any]] = [
@@ -1395,13 +2038,59 @@ class DynamoRepository:
                     "TableName": self.settings.core_table,
                     "Key": self._ddb({"pk": f"HOUSE#{household_id}", "sk": "META"}),
                     "UpdateExpression": (
-                        "SET #status=:inactive, inactive_at=:at "
+                        "SET #status=:inactive, inactive_at=:at, "
+                        "membership_version=:next_membership_version "
                         "REMOVE emergency_address, invite_hash, invite_nonce, invite_expires_at"
                     ),
-                    "ConditionExpression": "#status=:active AND owner_user_id=:owner",
+                    "ConditionExpression": (
+                        "#status=:active AND owner_user_id=:owner AND "
+                        + self._withdrawal_snapshot_clause(
+                            "membership_version",
+                            ":current_membership_version",
+                            household.membership_version,
+                            legacy_zero=True,
+                        )
+                        + " AND "
+                        + self._withdrawal_snapshot_clause(
+                            "invite_hash", ":invite_hash", household.invite_hash
+                        )
+                        + " AND "
+                        + self._withdrawal_snapshot_clause(
+                            "invite_nonce", ":invite_nonce", household.invite_nonce
+                        )
+                        + " AND "
+                        + self._withdrawal_snapshot_clause(
+                            "invite_expires_at",
+                            ":invite_expires_at",
+                            household.invite_expires_at,
+                        )
+                        + " AND "
+                        + self._withdrawal_snapshot_clause(
+                            "emergency_address",
+                            ":emergency_address",
+                            asdict(household.emergency_address)
+                            if household.emergency_address is not None
+                            else None,
+                        )
+                    ),
                     "ExpressionAttributeNames": {"#status": "status"},
                     "ExpressionAttributeValues": self._ddb(
-                        {":inactive": "inactive", ":active": "active", ":at": iso_utc(now), ":owner": user_id}
+                        {
+                            ":inactive": "inactive",
+                            ":active": "active",
+                            ":at": iso_utc(now),
+                            ":owner": user_id,
+                            ":current_membership_version": household.membership_version,
+                            ":next_membership_version": household.membership_version + 1,
+                            ":invite_hash": household.invite_hash,
+                            ":invite_nonce": household.invite_nonce,
+                            ":invite_expires_at": household.invite_expires_at,
+                            ":emergency_address": (
+                                asdict(household.emergency_address)
+                                if household.emergency_address is not None
+                                else None
+                            ),
+                        }
                     ),
                 }
             }
@@ -1412,10 +2101,15 @@ class DynamoRepository:
                     "Delete": {
                         "TableName": self.settings.core_table,
                         "Key": self._ddb({"pk": f"INVITE#{household.invite_hash}", "sk": "INVITE"}),
+                        "ConditionExpression": "household_id=:house",
+                        "ExpressionAttributeValues": self._ddb({":house": household_id}),
                     }
                 }
             )
-        for member in members:
+        for membership_item, member in membership_rows:
+            linked_at_condition = self._withdrawal_snapshot_clause(
+                "linked_at", ":linked_at", membership_item.get("linked_at")
+            )
             operations.extend(
                 [
                     {
@@ -1427,8 +2121,18 @@ class DynamoRepository:
                                 "REMOVE household_id, #role, linked_at"
                             ),
                             "ExpressionAttributeNames": {"#role": "role"},
-                            "ConditionExpression": "attribute_exists(pk) AND household_id=:house",
-                            "ExpressionAttributeValues": self._ddb({":unlinked": "unlinked", ":house": household_id}),
+                            "ConditionExpression": (
+                                "attribute_exists(pk) AND household_id=:house AND "
+                                "household_link_status=:linked AND #role=:member_role AND "
+                                + linked_at_condition
+                            ),
+                            "ExpressionAttributeValues": self._ddb({
+                                ":unlinked": "unlinked",
+                                ":linked": "linked",
+                                ":house": household_id,
+                                ":member_role": member.role,
+                                ":linked_at": membership_item.get("linked_at"),
+                            }),
                         }
                     },
                     {
@@ -1437,6 +2141,13 @@ class DynamoRepository:
                             "Key": self._ddb(
                                 {"pk": f"HOUSE#{household_id}", "sk": f"MEMBER#{member.user_id}"}
                             ),
+                            "ConditionExpression": (
+                                "user_id=:member_id AND " + linked_at_condition
+                            ),
+                            "ExpressionAttributeValues": self._ddb({
+                                ":member_id": member.user_id,
+                                ":linked_at": membership_item.get("linked_at"),
+                            }),
                         }
                     },
                 ]

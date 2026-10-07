@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import threading
 from dataclasses import asdict
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
 from boto3.dynamodb.types import TypeDeserializer
 
-from hearo_backend.domain import User
-from hearo_backend.store import DynamoRepository, MemoryRepository, NotFoundError
+from hearo_backend.domain import Household, User
+from hearo_backend.store import ConflictError, DynamoRepository, MemoryRepository, NotFoundError
+
+from .conftest import auth_header, create_family
 
 
 def user(user_id: str, *, linked: bool = False) -> User:
@@ -50,6 +53,88 @@ def test_reference_version_is_internal_and_does_not_revoke_access_tokens():
     assert value.reference_version == 0
     assert value.token_version == 0
     assert "reference_version" not in value.public()
+
+
+def test_http_auth_uses_current_profile_not_a_stale_eventual_read(api, monkeypatch):
+    family = create_family(api)
+    stale = api.repository.get_user(family["user"]["user_id"])
+    monkeypatch.setattr(api.repository, "get_user", lambda _user_id: stale)
+    monkeypatch.setattr(api.repository, "get_user_consistent", lambda _user_id: None)
+
+    response = api.client.get("/me", headers=auth_header(family))
+    assert response.status_code == 401
+    assert response.json()["code"] == "REVOKED_ACCESS_TOKEN"
+
+
+def test_withdrawal_fences_the_hash_actually_verified(monkeypatch):
+    from hearo_backend import services
+
+    repository = MemoryRepository()
+    value = user("password-race")
+    repository.create_unlinked_user(value)
+
+    def verify_then_change_password(_password, password_hash):
+        assert password_hash == "hash"
+        repository.update_user_password(value.user_id, "new-hash")
+        return True
+
+    monkeypatch.setattr(services, "verify_password", verify_then_change_password)
+    with pytest.raises(ConflictError) as exc:
+        services.delete_account(repository, value, "old-password")
+
+    assert exc.value.code == "ACCOUNT_DELETION_CONFLICT"
+    assert repository.get_user(value.user_id).password_hash == "new-hash"
+    assert repository.users_by_login_id[value.login_id] == value.user_id
+
+
+def test_memory_reader_cannot_observe_temporary_unlink_during_failed_withdrawal(monkeypatch):
+    repository = MemoryRepository()
+    owner = user("owner", linked=True)
+    owner.role = "owner"
+    owner.account_type = "household_owner"
+    repository.create_owner(owner, Household("home-1", "합성 가구", owner.user_id), [])
+    deletion_started = threading.Event()
+    allow_failure = threading.Event()
+    read_started = threading.Event()
+    read_finished = threading.Event()
+    outcomes = []
+    observed = []
+
+    def fail_delete(_user_id):
+        deletion_started.set()
+        assert allow_failure.wait(timeout=2)
+        raise ConflictError("injected failure", code="ACCOUNT_DELETION_CONFLICT")
+
+    def withdraw():
+        try:
+            repository.withdraw_user_account(
+                owner.user_id, datetime.now(UTC), expected_password_hash="hash",
+            )
+        except Exception as exc:
+            outcomes.append(exc)
+
+    def read():
+        read_started.set()
+        observed.append(repository.get_user(owner.user_id).household_link_status)
+        read_finished.set()
+
+    monkeypatch.setattr(repository, "delete_user_account", fail_delete)
+    writer = threading.Thread(target=withdraw)
+    reader = threading.Thread(target=read)
+    writer.start()
+    try:
+        assert deletion_started.wait(timeout=2)
+        reader.start()
+        assert read_started.wait(timeout=2)
+        assert not read_finished.wait(timeout=0.05)
+    finally:
+        allow_failure.set()
+        writer.join(timeout=2)
+        if reader.ident is not None:
+            reader.join(timeout=2)
+    assert not writer.is_alive() and not reader.is_alive()
+    assert len(outcomes) == 1 and isinstance(outcomes[0], ConflictError)
+    assert observed == ["linked"]
 
 
 def test_memory_refresh_token_write_is_fenced_against_account_deletion():

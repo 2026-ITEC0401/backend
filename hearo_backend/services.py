@@ -196,27 +196,22 @@ def delete_account(
     current_password: str,
     now: datetime | None = None,
 ) -> dict[str, Any]:
-    if not verify_password(current_password, user.password_hash):
+    verified_password_hash = user.password_hash
+    if not verify_password(current_password, verified_password_hash):
         raise ConflictError(
             "현재 비밀번호가 올바르지 않습니다.",
             code="CURRENT_PASSWORD_MISMATCH",
             field_errors={"current_password": "현재 비밀번호를 다시 확인해 주세요."},
         )
 
-    previous_household_id = user.household_id
-    household_status: str | None = None
-    if user.household_link_status == "linked" and previous_household_id:
-        unlink_result = repository.unlink_user(
-            user.user_id,
-            now or datetime.now(UTC),
-        )
-        household_status = unlink_result["household_status"]
-
-    repository.delete_user_account(user.user_id)
-    return {
-        "previous_household_id": previous_household_id,
-        "household_status": household_status,
-    }
+    # The storage layer commits membership effects and identity deletion together.
+    # Fence the password verified above so a concurrent password change cannot
+    # allow withdrawal with credentials that are no longer current.
+    return repository.withdraw_user_account(
+        user.user_id,
+        now or datetime.now(UTC),
+        expected_password_hash=verified_password_hash,
+    )
 
 
 def current_invite(repository, settings: Settings, household: Household) -> dict[str, str]:

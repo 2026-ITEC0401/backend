@@ -1,6 +1,6 @@
 # v2.4.0 단계별 적용 안내
 
-이 문서는 명령 예시이며 실행 완료 기록이 아니다. GitHub PR 병합 → 별도 r6 스테이징 → 검증 → 운영 전환 → 데이터 계획 승인/마이그레이션 → TTL/정리 도구 → 로그 설정 순으로 진행한다. 명령은 한 블록씩 실행하고 오류가 나면 다음 단계로 진행하지 않는다. EC2에서만 실행하며 Mac 경로와 혼동하지 않는다.
+이 문서는 명령 예시이며 실행 완료 기록이 아니다. GitHub PR 병합 → 별도 r6 스테이징 → 격리된 실제 DynamoDB 검증 → 운영 전환 → 데이터 계획 승인/마이그레이션 → TTL/정리 도구 → 로그 설정 순으로 진행한다. 명령은 한 블록씩 실행하고 오류가 나면 다음 단계로 진행하지 않는다. EC2에서만 실행하며 Mac 경로와 혼동하지 않는다.
 
 ## 0. 범위와 중단 기준
 
@@ -11,10 +11,10 @@
 - 실제 문서 버전·시행일·공개 URL 확정, 프론트 동의 화면 구현. 그 전에는 문서 환경값은 빈 값, `required=false` 유지.
 - 감사·보안 접속기록의 별도 1년 이상 보존. 검증 전 전역 journald 90일 설정 금지.
 - owner 탈퇴 후 비활성 가구/기기에 남는 개인정보와 문서의 파기 문구 정합성 결정.
-- 연동 계정의 탈퇴 도중 실패했을 때 선행 가구 연동 해제의 복구 정책·구현·검증. 후속 `409`에도 owner 가구 비활성화와 member 미연동이 이미 반영될 수 있으므로 현재 PR은 운영 전환 전 검토용이다. 실제 계정으로 실패 시험하지 않는다.
-- 동의 영수증 97개 초과 계정의 관리자 처리, 일반 로그의 오래된 파일 정리와 PITR/임시 백업 보존 예외 검토.
+- 연결된 계정 탈퇴의 원자적 DynamoDB 트랜잭션과 `membership_version` fence는 소스에 반영됐지만 운영에는 배포하지 않았다. 격리된 실제 DynamoDB에서 용량 경계·조건 충돌·전송 실패를 검증하기 전에는 운영 전환하지 않는다.
+- 한 트랜잭션에 100개를 초과하는 고유 항목이 필요하거나 멤버십 상태가 불완전해 `ACCOUNT_DELETION_REVIEW_REQUIRED`가 되는 계정의 관리자 처리, 일반 로그의 오래된 파일 정리와 PITR/임시 백업 보존 예외를 검토한다.
 
-스테이징에 운영 테이블을 연결하면 테스트의 PATCH/탈퇴/알림 생성도 **실제 운영 데이터를 변경한다**. 별도 core/alerts 테스트 테이블을 권장하며, 실제 사용자 계정을 탈퇴 테스트에 사용하지 않는다. 새로운 AWS 테이블·역할 생성은 비용과 권한이 발생하므로 별도 승인 없이 실행하지 않는다.
+스테이징에 운영 또는 다른 환경과 공유하는 테이블을 연결하면 테스트의 PATCH/탈퇴/알림 생성도 **공유 데이터를 변경한다**. 쓰기 검증은 전용 core/alerts 테스트 테이블에서만 수행하고 실제 사용자 계정을 사용하지 않는다. 메모리 스토어를 사용하는 격리 스테이징은 병행 실행해도 되지만 실제 DynamoDB 동작의 증거가 아니다. 새로운 AWS 테이블·역할 생성은 비용과 권한이 발생하므로 별도 승인 없이 실행하지 않는다.
 
 ## 1. 운영 상태·권한 확인 (읽기 전용)
 
@@ -80,7 +80,7 @@ python3 -m venv .venv
 .venv/bin/python -m pytest -q
 ```
 
-운영 env는 새 파일로 복사하고 권한 600을 유지한다. 출력/붙여넣기에 secret 전체를 노출하지 않는다. `/etc/hearo/hearo-api-v2-r6-staging.env`에는 `HEARO_ENV=development`, `HEARO_MQTT_ENABLED=false`, 테스트 테이블 이름을 사용한다. 기존 unread 기준시각·JWT secret·CORS를 임의 변경하지 않는다. 문서 값 미정 상태에서는 신규 5개 환경값을 비우고 `HEARO_LEGAL_CONSENT_REQUIRED=false`로 둔다.
+운영 env는 새 파일로 복사하고 권한 600을 유지한다. 출력/붙여넣기에 secret 전체를 노출하지 않는다. `/etc/hearo/hearo-api-v2-r6-staging.env`에는 `HEARO_ENV=development`, `HEARO_MQTT_ENABLED=false`를 사용한다. DynamoDB를 사용하는 스테이징이면 운영 또는 다른 환경과 공유하지 않는 테스트 테이블 이름만 허용한다. 기존 unread 기준시각·JWT secret·CORS를 임의 변경하지 않는다. 문서 값 미정 상태에서는 신규 5개 환경값을 비우고 `HEARO_LEGAL_CONSENT_REQUIRED=false`로 둔다.
 
 ```bash
 sudo systemd-run --wait --pipe --collect --property=EnvironmentFile=/etc/hearo/hearo-api-v2-r6-staging.env --property=WorkingDirectory=/opt/hearo-backend-v2-r6 /opt/hearo-backend-v2-r6/.venv/bin/python -c 'from hearo_backend.config import Settings; s=Settings(); s.validate_for_production(); assert s.environment == "development"; assert not s.mqtt_enabled; print("R6 STAGING CONFIG OK")'
@@ -110,7 +110,18 @@ sudo journalctl -u hearo-api-v2-r6-staging -n 50 --no-pager -o cat
 
 정상 기준은 `2.4.0`, 공개 전 `configured=false`, 새 GET/PATCH `/me/consents`의 OpenAPI 등록이다. 버전 테스트용 문서 설정은 테스트 테이블에만 넣는다. 신규/기존/부분 동의 복구, 정확한 90일 경계, 7일 이력·미확인 유지, 탈퇴 및 기존 LED·주소·MQTT·WebSocket 회귀를 테스트한다. 패키지/실제 AWS/실제 프론트가 로컬 테스트와 같다고 가정하지 않는다.
 
-탈퇴 실패 시험은 별도 테이블의 임시 owner/member로 진행한다. 97개 초과 동의 이력, 조건 충돌, 쓰기 장애를 주입했을 때 계정 삭제뿐 아니라 선행 가구 상태·주소·초대 코드·구성원 연결까지 확인한다. 기존 단위 테스트 성공은 이 전체 복구 경로의 운영 승인 근거가 아니다. 복구 대책이 없는 상태에서는 3절 운영 전환으로 진행하지 않는다.
+연결 계정 탈퇴는 격리된 실제 DynamoDB의 합성 owner/member로 다음 항목을 모두 확인해야 한다.
+
+- `Scan`과 `Query`가 여러 페이지를 반환하도록 만든 참조·동의 영수증을 사전 읽기에서 빠짐없이 집계한다.
+- member 탈퇴와 owner 탈퇴가 각각 계정 삭제, 멤버십 변경 또는 전체 구성원 미연동, 가구 비활성화와 관련 정리를 한 트랜잭션으로 완료한다.
+- 조건 충돌과 확인 가능한 트랜잭션 취소 시 `409 ACCOUNT_DELETION_CONFLICT`가 반환되고 계정·가구·멤버십이 함께 보존된다.
+- 100개를 초과하는 고유 항목이 필요한 계획과 불완전한 멤버십 스냅샷은 트랜잭션 호출 전에 `409 ACCOUNT_DELETION_REVIEW_REQUIRED`가 되고 어떤 항목도 변경하지 않는다.
+- 전송 결과를 알 수 없는 실패도 `409 ACCOUNT_DELETION_CONFLICT`가 될 수 있다. 이 경우 `/me`와 `/households/current`를 재조회해 실제 상태를 확인하고 같은 탈퇴 요청을 무조건 반복하지 않는다.
+- 이미 미연동인 계정의 공개 탈퇴도 참조·동의·계정 식별정보를 단일 트랜잭션으로 삭제한다. 호환용 저장소 직접 호출의 묶음 정리 경로는 공개 API 검증과 별도로 계정 식별정보가 최종 단계까지 보존되는지 확인한다.
+
+메모리 저장소와 stub 클라이언트 단위 테스트는 이 검증을 대체하지 않는다. DynamoDB 트랜잭션은 [AWS `TransactWriteItems` 명세](https://docs.aws.amazon.com/amazondynamodb/latest/APIReference/API_TransactWriteItems.html)에 따라 최대 100개의 서로 다른 항목, 전체 항목 크기 4MiB이며 한 트랜잭션에서 같은 항목을 두 작업이 대상으로 삼을 수 없다. 구현은 고유 항목 수를 사전 검사하지만 100개 이하라는 사실만으로 4MiB 충족이 증명되지는 않는다. 조건식과 실제 항목 크기를 포함한 요청이 격리된 실제 서비스에서 허용되는지 확인하고, 4MiB를 넘는 항목 계획이 일부만 반영되지 않고 원자적으로 거부되는지도 검증한다. DynamoDB가 트랜잭션을 거부하면 `ACCOUNT_DELETION_CONFLICT`로 처리한다. 위 실제 서비스 검증 증거가 없으면 3절 운영 전환으로 진행하지 않는다.
+
+`membership_version`은 가구 멤버십 변경의 내부 fence다. 기존 가구의 누락 값은 `0`으로 읽고, 새 코드의 연동·연동 해제·연결 계정 탈퇴는 관련 변경과 같은 트랜잭션에서 이 값을 갱신한다. 이 fence를 모르는 r5 또는 수정 전 r6 API writer가 같은 DynamoDB 테이블에 동시에 쓰면 보호가 무효화될 수 있다. 메모리 저장소나 완전히 분리된 테스트 테이블의 스테이징은 병행할 수 있지만, 공유 테이블에 연결한 구버전·신버전 API의 동시 쓰기는 금지한다.
 
 ## 3. 운영 설정 백업과 전환
 
@@ -123,7 +134,10 @@ sudo systemd-run --wait --pipe --collect --property=EnvironmentFile=/etc/hearo/h
 ```bash
 sudo systemctl stop hearo-api-v2-r6-staging
 sudo systemctl stop hearo-mqtt-bridge-v2-final
+sudo systemctl stop hearo-api-v2-final
 ```
+
+이 시점부터 수정된 API가 시작될 때까지 운영 API 쓰기는 중단된다. 구버전 writer와 수정된 writer를 같은 테이블에 겹쳐 실행하는 무중단 전환은 허용하지 않는다.
 
 ```bash
 sudo install -o root -g root -m 644 infra/systemd/hearo-api-v2-r6.service /etc/systemd/system/hearo-api-v2-final.service
@@ -133,7 +147,7 @@ sudo install -o root -g root -m 644 infra/systemd/hearo-mqtt-bridge-v2-r6.servic
 ```bash
 sudo systemd-analyze verify /etc/systemd/system/hearo-api-v2-final.service /etc/systemd/system/hearo-mqtt-bridge-v2-final.service
 sudo systemctl daemon-reload
-sudo systemctl restart hearo-api-v2-final
+sudo systemctl start hearo-api-v2-final
 ```
 
 API의 내부/외부 health가 `2.4.0`을 반환하는 것을 확인한 후 Bridge를 시작한다.
@@ -227,8 +241,10 @@ API/Bridge에서 요청 body, 비밀번호, Authorization, credential, 전화번
 
 설정/서비스 백업과 r5 코드는 보존한다. 그러나 단순히 r5로 돌아가면 90일 조회 차단이 사라지고 새 알림 TTL이 누락된다. 공개된 90일 정책 적용 후에는 무조건적인 r5 재시작 대신 수집/조회 일시 차단, 보존 필터를 포함한 핫픽스 또는 검증된 순방향 수정이 필요하다. 되돌리는 동안도 TTL·정리 작업을 임의로 해제하지 않는다.
 
+수정된 API가 `membership_version`을 사용하기 시작한 뒤에는 같은 운영 테이블을 바라보는 r5 또는 수정 전 r6 API를 writer로 다시 시작하지 않는다. 구버전은 fence를 갱신하지 않아 동시 연동·해제·탈퇴 보호를 우회할 수 있다. 문제가 생기면 API 쓰기를 중단하고 fence를 이해하는 검증된 순방향 수정으로 복구한다.
+
 일괄 마이그레이션의 삭제는 API 코드 롤백으로 되돌아오지 않는다. 계획의 변경 전 이미지나 PITR 복구는 수동 검토 대상이며 만료 알림·탈퇴 계정·오래된 약관 상태를 그대로 재노출하지 않는다. TTL 활성화 후 만료된 데이터를 ‘복구용’이라는 이유로 무기한 재등록하지 않는다.
 
 ## 8. 완료 증거
 
-운영 완료라고 보고하려면 외부 버전/새 API/CORS, 최근 정상 MQTT `200`, 기존 이력/미확인/LED/탈퇴, 본문·별칭 TTL, 신규/기존 동의 상태, 실제 프론트, 자동 정리 실행 결과, 로그·백업 보존 예외 결정의 증거를 확인한다. 로컬 테스트만으로 이를 대체하지 않는다.
+운영 완료라고 보고하려면 외부 버전/새 API/CORS, 최근 정상 MQTT `200`, 기존 이력/미확인/LED/탈퇴, 본문·별칭 TTL, 신규/기존 동의 상태, 실제 프론트, 자동 정리 실행 결과, 로그·백업 보존 예외 결정의 증거를 확인한다. 연결 계정 탈퇴의 격리된 실제 DynamoDB 경계·실패 시험과 구버전 writer가 같은 테이블에서 동시에 실행되지 않았다는 전환 기록도 필요하다. 로컬·메모리·stub 테스트만으로 이를 대체하지 않는다.

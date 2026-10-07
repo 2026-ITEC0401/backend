@@ -115,7 +115,10 @@ def test_member_delete_failure_preserves_error_and_closes_existing_websocket(
         _assert_policy_close(websocket)
         current = api.client.get("/households/current", headers=auth_header(family))
         assert current.status_code == 200
-        assert current.json()["household_link_status"] == "unlinked"
+        assert current.json()["household_link_status"] == "linked"
+        # The conservative socket close is not a committed membership change.
+        with api.client.websocket_connect(f"/ws/households/{household_id}") as reopened:
+            _authenticate(reopened, family)
 
 
 def test_owner_delete_failure_closes_every_household_websocket(api, monkeypatch):
@@ -147,7 +150,45 @@ def test_owner_delete_failure_closes_every_household_websocket(api, monkeypatch)
             assert response.json()["code"] == "ACCOUNT_DELETION_CONFLICT"
             _assert_policy_close(owner_ws)
             _assert_policy_close(member_ws)
-            assert api.repository.get_household(household_id).status == "inactive"
+            assert api.repository.get_household(household_id).status == "active"
+            assert api.repository.get_user(family["user"]["user_id"]).household_id == household_id
+
+
+@pytest.mark.parametrize("role", ["owner", "member"])
+def test_withdrawal_unknown_committed_outcome_does_not_attempt_partial_rollback(
+    api, monkeypatch, role,
+):
+    owner = create_owner(api)
+    family = _link_family(api, owner)
+    household_id = owner["user"]["household_id"]
+    selected = owner if role == "owner" else family
+    original = api.repository.withdraw_user_account
+    committed = []
+
+    def commit_then_fail(*args, **kwargs):
+        committed.append(original(*args, **kwargs))
+        raise ConflictError("simulated lost transaction response", code="ACCOUNT_DELETION_CONFLICT")
+
+    monkeypatch.setattr(api.repository, "withdraw_user_account", commit_then_fail)
+    with api.client.websocket_connect(f"/ws/households/{household_id}") as websocket:
+        _authenticate(websocket, selected)
+        response = api.client.request(
+            "DELETE", "/me", headers=auth_header(selected),
+            json={"current_password": "StrongPassword123" if role == "owner" else "MemberPassword123"},
+        )
+        assert response.status_code == 409
+        assert response.json()["code"] == "ACCOUNT_DELETION_CONFLICT"
+        _assert_policy_close(websocket)
+
+    assert len(committed) == 1
+    assert api.repository.get_user(selected["user"]["user_id"]) is None
+    assert api.client.get("/me", headers=auth_header(selected)).status_code == 401
+    household = api.repository.get_household(household_id)
+    assert household.status == ("inactive" if role == "owner" else "active")
+    if role == "owner":
+        assert api.repository.get_user(family["user"]["user_id"]).household_link_status == "unlinked"
+    else:
+        assert api.repository.get_user(owner["user"]["user_id"]).household_link_status == "linked"
 
 
 def test_member_unlink_unknown_outcome_preserves_error_and_closes_websocket(

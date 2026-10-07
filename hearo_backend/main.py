@@ -231,7 +231,9 @@ def create_app(
             payload = app.state.tokens.decode(credentials.credentials, "access")
         except TokenError as exc:
             raise _error(401, "INVALID_ACCESS_TOKEN", str(exc)) from exc
-        user = app.state.repository.get_user(payload["sub"])
+        # A stale eventually-consistent PROFILE must not authenticate a token
+        # after successful withdrawal or password-based token revocation.
+        user = app.state.repository.get_user_consistent(payload["sub"])
         if not user or user.token_version != payload.get("tv"):
             raise _error(401, "REVOKED_ACCESS_TOKEN", "폐기된 인증 정보입니다.")
         return user
@@ -476,10 +478,10 @@ def create_app(
                 payload.current_password,
             )
         except Exception as exc:
-            # The household unlink commits before the final account deletion.
-            # Its outcome can be unknown after a storage error, so revoke the
-            # existing realtime permission conservatively while preserving the
-            # original HTTP error. A password mismatch happens before unlink.
+            # A transaction's outcome can be unknown after a transport error.
+            # Revoke existing realtime permission conservatively while retaining
+            # the original HTTP error; reconnect rechecks current membership.
+            # A password mismatch happens before the storage operation.
             if (
                 previous_household_id
                 and getattr(exc, "code", None) != "CURRENT_PASSWORD_MISMATCH"

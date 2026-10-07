@@ -252,9 +252,11 @@ def test_owner_unlink_transaction_removes_address_invite_and_all_members():
         ),
         invite_hash="invite-hash",
     )
-    repo.get_user = lambda user_id: owner if user_id == owner.user_id else member
-    repo.get_household = lambda household_id: household
-    repo.list_members = lambda household_id: [owner, member]
+    repo.get_user_consistent = lambda user_id: owner if user_id == owner.user_id else member
+    repo.get_household_consistent = lambda household_id: household
+    repo._consistent_household_members = lambda household_id: [
+        ({"linked_at": value.linked_at}, value) for value in (owner, member)
+    ]
 
     result = repo.unlink_user(owner.user_id, datetime.now(UTC))
 
