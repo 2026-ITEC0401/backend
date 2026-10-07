@@ -43,6 +43,9 @@ class User:
     terms_service_agreed: bool = False
     privacy_agreed: bool = False
     consented_at: str | None = None
+    # A signup declaration, not verified age. Missing legacy proof stays null.
+    age_over_14_agreed: bool | None = None
+    age_over_14_agreed_at: str | None = None
     # Unknown legacy versions stay null; a deployment must not invent consent.
     terms_version: str | None = None
     privacy_version: str | None = None
@@ -65,6 +68,8 @@ class User:
             "terms_version": self.terms_version,
             "privacy_version": self.privacy_version,
             "consented_at": self.consented_at,
+            "age_over_14_agreed": self.age_over_14_agreed,
+            "age_over_14_agreed_at": self.age_over_14_agreed_at,
             "created_at": self.created_at,
         }
 

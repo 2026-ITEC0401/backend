@@ -82,6 +82,8 @@ def signup(repository, tokens: TokenManager, settings: Settings, request) -> dic
             terms_service_agreed=True,
             privacy_agreed=True,
             consented_at=now,
+            age_over_14_agreed=request.age_over_14_agreed,
+            age_over_14_agreed_at=now,
             terms_version=terms_version,
             privacy_version=privacy_version,
         )
@@ -134,6 +136,8 @@ def signup(repository, tokens: TokenManager, settings: Settings, request) -> dic
             terms_service_agreed=True,
             privacy_agreed=True,
             consented_at=now,
+            age_over_14_agreed=request.age_over_14_agreed,
+            age_over_14_agreed_at=now,
             terms_version=terms_version,
             privacy_version=privacy_version,
         )

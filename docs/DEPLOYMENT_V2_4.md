@@ -11,10 +11,15 @@
 - 실제 문서 버전·시행일·공개 URL 확정, 프론트 동의 화면 구현. 그 전에는 문서 환경값은 빈 값, `required=false` 유지.
 - 감사·보안 접속기록의 별도 1년 이상 보존. 검증 전 전역 journald 90일 설정 금지.
 - owner 탈퇴 후 비활성 가구/기기에 남는 개인정보와 문서의 파기 문구 정합성 결정.
-- 연결된 계정 탈퇴의 원자적 DynamoDB 트랜잭션과 `membership_version` fence는 소스에 반영됐지만 운영에는 배포하지 않았다. 격리된 실제 DynamoDB에서 용량 경계·조건 충돌·전송 실패를 검증하기 전에는 운영 전환하지 않는다.
+- 연결된 계정 탈퇴의 원자적 DynamoDB 트랜잭션과 `membership_version` fence는 소스에 반영됐지만 운영에는 배포하지 않았다. 기존 승인 소스의 실제 100개 성공·101개 사전 차단·조건 충돌은 검증했으며, 원본 Delete의 4MiB 한계·결과 불명 전송 실패와 새 연령 확인 변경의 실제 AWS 재검증은 아직 남아 있다.
 - 한 트랜잭션에 100개를 초과하는 고유 항목이 필요하거나 멤버십 상태가 불완전해 `ACCOUNT_DELETION_REVIEW_REQUIRED`가 되는 계정의 관리자 처리, 일반 로그의 오래된 파일 정리와 PITR/임시 백업 보존 예외를 검토한다.
+- 새 회원가입의 `age_over_14_agreed` 필수 계약과 프론트 체크박스를 같은 전환 창에 배포한다. 구·신 프론트와 백엔드를 섞으면 회원가입이 양방향 `422`가 되므로 동기화 전에는 가입을 열지 않는다.
 
 스테이징에 운영 또는 다른 환경과 공유하는 테이블을 연결하면 테스트의 PATCH/탈퇴/알림 생성도 **공유 데이터를 변경한다**. 쓰기 검증은 전용 core/alerts 테스트 테이블에서만 수행하고 실제 사용자 계정을 사용하지 않는다. 메모리 스토어를 사용하는 격리 스테이징은 병행 실행해도 되지만 실제 DynamoDB 동작의 증거가 아니다. 새로운 AWS 테이블·역할 생성은 비용과 권한이 발생하므로 별도 승인 없이 실행하지 않는다.
+
+### 사용자 제공 90일 스테이징 스모크 기록
+
+제공된 로그에서는 합성 알림 기준 89일 데이터 노출과 91일 데이터 차단, 신규 레코드의 TTL 값, 최근 7일 이력·미확인 계산, 실제 WebSocket 알림, 탈퇴 차단 경로가 성공했다(`V2.4 REAL DYNAMODB RETENTION SMOKE TEST OK`, 12.737초). 시험 알림 본문·별칭과 임시 계정은 정리됐고 해당 비활성 합성 가구와 기기·credential 레코드는 남는다. 이는 운영 배포 완료 증거가 아니다. 정확한 90일 ±1µs 경계는 고정 시각 단위 테스트만 검증했으며, 실제 AWS 경계·TTL의 자동 물리 삭제·운영 MQTT·실제 프론트 연결·전체 기존 데이터 마이그레이션은 아직 확인하지 않았다. 이후 가입 연령 계약을 합친 새 커밋도 별도 스테이징 산출물로 다시 검증한다.
 
 ## 1. 운영 상태·권한 확인 (읽기 전용)
 
@@ -46,7 +51,7 @@ aws dynamodb describe-table --region ap-south-1 --table-name hearo-core-v2-final
 
 ## 2. r6 설치와 스테이징
 
-GitHub 반영·병합된 **검증한 커밋**을 새 r6에 체크아웃한다. 운영 r5에서 `git pull`하여 덮어쓰지 않는다. 새 디렉터리가 이미 있으면 내용을 확인하고 덮어쓰지 않는다.
+GitHub 반영·병합된 **검증한 커밋**을 새 r6에 체크아웃한다. 운영 r5에서 `git pull`하여 덮어쓰지 않는다. 새 디렉터리가 이미 있으면 내용을 확인하고 덮어쓰지 않는다. 90일 스모크에 사용한 기존 승인 SHA나 검증 helper를 현장에서 수정하지 말고, 연령 확인 변경을 포함한 새 병합 SHA로 새 검증 산출물을 만든다.
 
 ```bash
 test ! -e /opt/hearo-backend-v2-r6
@@ -108,7 +113,17 @@ curl -sS http://127.0.0.1:8002/legal/policies
 sudo journalctl -u hearo-api-v2-r6-staging -n 50 --no-pager -o cat
 ```
 
-정상 기준은 `2.4.0`, 공개 전 `configured=false`, 새 GET/PATCH `/me/consents`의 OpenAPI 등록이다. 버전 테스트용 문서 설정은 테스트 테이블에만 넣는다. 신규/기존/부분 동의 복구, 정확한 90일 경계, 7일 이력·미확인 유지, 탈퇴 및 기존 LED·주소·MQTT·WebSocket 회귀를 테스트한다. 패키지/실제 AWS/실제 프론트가 로컬 테스트와 같다고 가정하지 않는다.
+정상 기준은 `2.4.0`, 공개 전 `configured=false`, 새 GET/PATCH `/me/consents`의 OpenAPI 등록이다. 연령 필드 추가만으로 서비스 버전을 바꾸지 않는다. 버전 테스트용 문서 설정은 테스트 테이블에만 넣는다. 신규/기존/부분 동의 복구, 정확한 90일 경계, 7일 이력·미확인 유지, 탈퇴 및 기존 LED·주소·MQTT·WebSocket 회귀를 테스트한다. 패키지/실제 AWS/실제 프론트가 로컬 테스트와 같다고 가정하지 않는다.
+
+회원가입 연령 확인은 격리 스테이징에서 다음을 모두 확인한다.
+
+- owner와 family member가 각각 실제 JSON `"age_over_14_agreed": true`로 가입되고 공개 User의 `age_over_14_agreed=true`, `age_over_14_agreed_at`이 반환된다.
+- 필드 누락, `false`, `null`, 숫자 `0`·`1`, 문자열 `"true"`·`"false"`가 각각 `422 VALIDATION_ERROR`와 해당 `field_errors`를 반환하고 USER·가구·멤버십·동의 영수증을 전혀 만들지 않는다.
+- 문서 설정이 비어 있는 호환 모드에서도 새 가입은 문서 버전 `null`을 유지하면서 세 확인값의 변경 불가 영수증을 만들고, PROFILE의 `consented_at`과 `age_over_14_agreed_at`이 같은 서버 UTC 시각이다. `null` 버전을 최신 문서 동의로 해석하지 않는다.
+- 연령 필드가 없는 기존 사용자는 공개 User와 `GET /me/consents`에서 연령 값이 `null`이고 로그인·기존 기능이 차단되지 않으며 일괄 `true` 보정이 없다.
+- `GET /me/consents`는 `age_over_14` 블록을 반환한다. `PATCH /me/consents`의 요청 모델은 기존 두 문서 동의만 받고, 성공 후에도 최초 연령 확인값·시각을 보존한다.
+
+구 프론트는 새 백엔드의 필수 연령 필드를 보내지 않아 `422`이고, 새 프론트는 추가 필드를 금지하는 구 백엔드에서 `422`다. 전환 전에 가입 UI를 일시 중지하고, 새 병합 SHA의 백엔드와 새 프론트를 모두 전환한 뒤 위 두 가입 유형 스모크가 성공할 때만 가입을 다시 연다. 롤백도 가입을 닫은 상태에서 프론트와 백엔드를 함께 되돌린다.
 
 연결 계정 탈퇴는 격리된 실제 DynamoDB의 합성 owner/member로 다음 항목을 모두 확인해야 한다.
 
@@ -125,7 +140,7 @@ sudo journalctl -u hearo-api-v2-r6-staging -n 50 --no-pager -o cat
 
 ## 3. 운영 설정 백업과 전환
 
-스테이징 성공 후 승인받은 시점에만 전환한다. root-only 새 백업 디렉터리에 두 env와 두 기존 systemd 파일을 복사하고 SHA-256/커밋을 기록한다. 같은 이름의 기존 백업을 덮어쓰지 않는다. 새 파일 `hearo-api-v2-r6.service`, `hearo-mqtt-bridge-v2-r6.service`는 설치할 때 운영의 기존 **final 서비스 이름**을 대상으로 사용한다.
+스테이징 성공 후 승인받은 시점에만 전환한다. root-only 새 백업 디렉터리에 두 env와 두 기존 systemd 파일을 복사하고 SHA-256/커밋을 기록한다. 같은 이름의 기존 백업을 덮어쓰지 않는다. 새 파일 `hearo-api-v2-r6.service`, `hearo-mqtt-bridge-v2-r6.service`는 설치할 때 운영의 기존 **final 서비스 이름**을 대상으로 사용한다. 가입 UI 중지와 프론트 동기화가 준비되지 않았으면 이 절을 시작하지 않는다.
 
 ```bash
 sudo systemd-run --wait --pipe --collect --property=EnvironmentFile=/etc/hearo/hearo-api-v2.env --property=WorkingDirectory=/opt/hearo-backend-v2-r6 /opt/hearo-backend-v2-r6/.venv/bin/python -c 'from hearo_backend.config import Settings; s=Settings(); s.validate_for_production(); print("R6 PRODUCTION CONFIG OK")'
@@ -247,4 +262,4 @@ API/Bridge에서 요청 body, 비밀번호, Authorization, credential, 전화번
 
 ## 8. 완료 증거
 
-운영 완료라고 보고하려면 외부 버전/새 API/CORS, 최근 정상 MQTT `200`, 기존 이력/미확인/LED/탈퇴, 본문·별칭 TTL, 신규/기존 동의 상태, 실제 프론트, 자동 정리 실행 결과, 로그·백업 보존 예외 결정의 증거를 확인한다. 연결 계정 탈퇴의 격리된 실제 DynamoDB 경계·실패 시험과 구버전 writer가 같은 테이블에서 동시에 실행되지 않았다는 전환 기록도 필요하다. 로컬·메모리·stub 테스트만으로 이를 대체하지 않는다.
+운영 완료라고 보고하려면 외부 버전/새 API/CORS, 최근 정상 MQTT `200`, 기존 이력/미확인/LED/탈퇴, 본문·별칭 TTL, 신규/기존 동의 상태, 실제 프론트, 자동 정리 실행 결과, 로그·백업 보존 예외 결정의 증거를 확인한다. 두 가입 유형의 엄격한 연령 확인, 무효 요청 무쓰기, 기존 사용자 `null`, 버전 `null` 영수증과 프론트·백엔드 동시 전환 기록도 필요하다. 연결 계정 탈퇴의 격리된 실제 DynamoDB 경계·실패 시험과 구버전 writer가 같은 테이블에서 동시에 실행되지 않았다는 전환 기록도 필요하다. 로컬·메모리·stub 테스트만으로 이를 대체하지 않는다.

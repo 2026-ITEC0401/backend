@@ -43,6 +43,7 @@ def test_signup_identity_uniqueness_and_unlinked_family_state(api):
             "signup_type": "family_member",
             "terms_service_agreed": True,
             "privacy_agreed": True,
+            "age_over_14_agreed": True,
         },
     )
     assert duplicate_login.status_code == 409
@@ -58,6 +59,7 @@ def test_signup_identity_uniqueness_and_unlinked_family_state(api):
             "signup_type": "family_member",
             "terms_service_agreed": True,
             "privacy_agreed": True,
+            "age_over_14_agreed": True,
         },
     )
     assert duplicate_phone.status_code == 409
@@ -91,6 +93,7 @@ def test_signup_and_password_change_require_letter_and_number(api):
             "signup_type": "family_member",
             "terms_service_agreed": True,
             "privacy_agreed": True,
+            "age_over_14_agreed": True,
         },
     )
     assert invalid_signup.status_code == 422
@@ -120,6 +123,7 @@ def test_signup_invalid_phone_has_field_specific_error(api):
             "signup_type": "family_member",
             "terms_service_agreed": True,
             "privacy_agreed": True,
+            "age_over_14_agreed": True,
         },
     )
     assert response.status_code == 400
