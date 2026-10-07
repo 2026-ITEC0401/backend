@@ -8,7 +8,7 @@ import pytest
 from boto3.dynamodb.types import TypeDeserializer
 from botocore.exceptions import ClientError
 
-from hearo_backend.domain import Alert, iso_utc
+from hearo_backend.domain import Alert, Household, iso_utc
 from hearo_backend.retention import (
     ALERT_RETENTION_SECONDS,
     alert_expiry_epoch,
@@ -45,6 +45,12 @@ def stored_item(value: Alert) -> dict:
     return item
 
 
+def activate_memory_household(repository: MemoryRepository, household_id: str) -> None:
+    repository.households[household_id] = Household(
+        household_id, "알림 보존 테스트", "owner-retention",
+    )
+
+
 def test_exact_ninety_day_boundary_and_memory_legacy_visibility(monkeypatch):
     fixed_now = datetime(2026, 10, 7, 12, 0, 0, 500_000, tzinfo=UTC)
     exact_boundary = fixed_now - timedelta(days=90)
@@ -61,6 +67,7 @@ def test_exact_ninety_day_boundary_and_memory_legacy_visibility(monkeypatch):
     )
 
     boundary_repository = MemoryRepository()
+    activate_memory_household(boundary_repository, "home-retention")
     with monkeypatch.context() as patch:
         patch.setattr("hearo_backend.retention.utc_now", lambda: fixed_now)
         at_boundary = alert("at-boundary", exact_boundary)
@@ -81,6 +88,7 @@ def test_exact_ninety_day_boundary_and_memory_legacy_visibility(monkeypatch):
         ] == [inside.event_id]
 
     repository = MemoryRepository()
+    activate_memory_household(repository, "home-retention")
     current = datetime.now(UTC)
     visible = alert("현재-알림", current - timedelta(days=7))
     expired_legacy = alert("만료-기존-알림", current - timedelta(days=91))
@@ -105,6 +113,7 @@ def test_exact_ninety_day_boundary_and_memory_legacy_visibility(monkeypatch):
 
 def test_memory_rejects_expired_and_invalid_but_accepts_future_and_duplicates():
     repository = MemoryRepository()
+    activate_memory_household(repository, "home-retention")
     current = datetime.now(UTC)
 
     assert repository.put_alert(alert("expired", current - timedelta(days=91))) is False
@@ -119,6 +128,16 @@ def test_memory_rejects_expired_and_invalid_but_accepts_future_and_duplicates():
     assert error.value.code == "INVALID_ALERT_TIMESTAMP"
 
 
+def test_memory_alert_write_requires_an_active_household():
+    repository = MemoryRepository()
+    current = datetime.now(UTC)
+    assert repository.put_alert(alert("missing-house", current)) is False
+    activate_memory_household(repository, "home-retention")
+    repository.households["home-retention"].status = "inactive"
+    assert repository.put_alert(alert("inactive-house", current)) is False
+    assert repository.alerts == {}
+
+
 class RecordingClient:
     class exceptions:
         class TransactionCanceledException(Exception):
@@ -131,12 +150,13 @@ class RecordingClient:
         self.operations = TransactItems
 
 
-def decode_item(operation: dict) -> dict:
+def decode(raw: dict) -> dict:
     deserializer = TypeDeserializer()
-    return {
-        key: deserializer.deserialize(value)
-        for key, value in operation["Put"]["Item"].items()
-    }
+    return {key: deserializer.deserialize(value) for key, value in raw.items()}
+
+
+def decode_item(operation: dict) -> dict:
+    return decode(operation["Put"]["Item"])
 
 
 def test_dynamo_new_body_and_event_id_alias_share_the_exact_ttl():
@@ -148,8 +168,13 @@ def test_dynamo_new_body_and_event_id_alias_share_the_exact_ttl():
     value = alert("same-ttl", datetime.now(UTC) - timedelta(minutes=1))
 
     assert repository.put_alert(value) is True
-    body = decode_item(repository.client.operations[0])
-    alias = decode_item(repository.client.operations[1])
+    condition = repository.client.operations[0]["ConditionCheck"]
+    assert decode(condition["Key"]) == {
+        "pk": "HOUSE#home-retention", "sk": "META",
+    }
+    assert "#status=:active" in condition["ConditionExpression"]
+    body = decode_item(repository.client.operations[1])
+    alias = decode_item(repository.client.operations[2])
     expected = alert_expiry_epoch(value.timestamp)
     assert body["expires_at_epoch"] == expected
     assert alias["expires_at_epoch"] == expected

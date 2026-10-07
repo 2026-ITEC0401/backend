@@ -189,14 +189,17 @@ def test_memory_display_name_write_fences_each_distinct_profile_once():
     member = user("member", linked=True)
     repository.users = {viewer.user_id: viewer, member.user_id: member}
     repository.members = {"home-1": {viewer.user_id, member.user_id}}
+    repository.households = {"home-1": Household("home-1", "가구", "owner")}
 
     repository.set_display_name("home-1", viewer.user_id, member.user_id, "가족")
     assert viewer.reference_version == member.reference_version == 1
     assert viewer.token_version == member.token_version == 0
+    assert repository.households["home-1"].registration_version == 1
 
     repository.set_display_name("home-1", viewer.user_id, viewer.user_id, "나")
     assert viewer.reference_version == 2
     assert member.reference_version == 1
+    assert repository.households["home-1"].registration_version == 2
 
 
 def test_memory_display_name_rejects_a_missing_or_unlinked_profile():
@@ -205,6 +208,7 @@ def test_memory_display_name_rejects_a_missing_or_unlinked_profile():
     member = user("member", linked=True)
     repository.users = {viewer.user_id: viewer, member.user_id: member}
     repository.members = {"home-1": {viewer.user_id, member.user_id}}
+    repository.households = {"home-1": Household("home-1", "가구", "owner")}
     member.household_link_status = "unlinked"
 
     with pytest.raises(NotFoundError):
@@ -236,7 +240,11 @@ def test_dynamo_display_name_fences_both_profiles_and_deduplicates_self():
     repository = dynamo()
     repository.set_display_name("home-1", "viewer-1", "member-1", "가족")
 
-    viewer, member, alias = repository.client.transactions[0]
+    house, viewer, member, alias = repository.client.transactions[0]
+    house_update = house["Update"]
+    assert decode(house_update["Key"]) == {"pk": "HOUSE#home-1", "sk": "META"}
+    assert house_update["UpdateExpression"] == "ADD registration_version :one"
+    assert "#status=:active" in house_update["ConditionExpression"]
     assert decode(viewer["Update"]["Key"])["pk"] == "USER#viewer-1"
     assert decode(member["Update"]["Key"])["pk"] == "USER#member-1"
     for operation in (viewer, member):
@@ -247,9 +255,10 @@ def test_dynamo_display_name_fences_both_profiles_and_deduplicates_self():
     assert decode(alias["Put"]["Item"])["sk"] == "ALIAS#viewer-1#member-1"
 
     repository.set_display_name("home-1", "viewer-1", "viewer-1", "나")
-    assert len(repository.client.transactions[1]) == 2
+    assert len(repository.client.transactions[1]) == 3
     assert "Update" in repository.client.transactions[1][0]
-    assert "Put" in repository.client.transactions[1][1]
+    assert "Update" in repository.client.transactions[1][1]
+    assert "Put" in repository.client.transactions[1][2]
 
 
 def test_user_deserialization_defaults_legacy_reference_version_to_zero():
