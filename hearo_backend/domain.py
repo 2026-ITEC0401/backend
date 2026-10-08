@@ -106,6 +106,11 @@ class Household:
     # Fence new household registration references during irreversible removal.
     # Device heartbeats do not increment this counter. Legacy rows read as zero.
     registration_version: int = 0
+    # Missing fields in pre-kit households mean already-installed legacy kits.
+    # Only the new signup writer explicitly opts into unregistered state.
+    device_kit_status: Literal["legacy_registered", "unregistered", "claimed"] = "legacy_registered"
+    kit_id: str | None = None
+    kit_claimed_at: str | None = None
 
     def public(self) -> dict[str, Any]:
         # 주소와 초대 코드 메타데이터는 각각의 전용 권한 API에서만 반환합니다.
@@ -139,6 +144,9 @@ class Device:
     audio_packets_sent: int = 0
     audio_packets_dropped: int = 0
     audio_clipped_samples: int = 0
+    # Display/ownership metadata only; never used as authentication secrets.
+    kit_id: str | None = None
+    hardware_id: str | None = None
 
     def raw(self) -> dict[str, Any]:
         return asdict(self)
