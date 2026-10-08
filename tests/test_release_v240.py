@@ -3,6 +3,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from hearo_backend.config import Settings
+from hearo_backend import __version__
 from hearo_backend.main import create_app
 
 
@@ -12,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 def test_health_and_unpublished_policy_release_contract():
     settings = Settings(environment="test", store_backend="memory", mqtt_enabled=False)
     with TestClient(create_app(settings=settings)) as client:
-        assert client.get("/health").json() == {"status": "ok", "version": "2.4.0"}
+        assert client.get("/health").json() == {"status": "ok", "version": __version__}
         response = client.get("/legal/policies")
         assert response.status_code == 200
         assert response.headers["cache-control"] == "no-store"
@@ -65,11 +66,11 @@ def test_public_release_docs_do_not_publish_unapproved_legal_contacts():
     assert "@" not in terms_contact_section
 
 
-def test_future_device_kit_spec_is_prominently_marked_unimplemented():
+def test_device_kit_spec_distinguishes_source_from_production_deployment():
     spec = (ROOT / "docs/DEVICE_KIT_API_SPEC.md").read_text(encoding="utf-8")
     header = "\n".join(spec.splitlines()[:12])
 
-    for marker in ("설계 초안", "미구현", "미배포", "v2.4.0", "OpenAPI"):
+    for marker in ("v2.5.0", "미구현", "미배포", "v2.4.0", "OpenAPI", "소스 구현과 운영 배포는 별개"):
         assert marker in header
 
 

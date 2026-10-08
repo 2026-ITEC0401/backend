@@ -124,6 +124,19 @@ class JusoRoadSearchRequest(StrictModel):
         return normalized
 
 
+class KitClaimRequest(StrictModel):
+    kit_id: str = Field(min_length=1, max_length=64)
+    claim_code: str = Field(min_length=1, max_length=32)
+
+    @field_validator("kit_id", "claim_code")
+    @classmethod
+    def normalize_kit_input(cls, value: str, info) -> str:
+        from .device_kits import normalize_claim_code, normalize_kit_id
+
+        normalizer = normalize_kit_id if info.field_name == "kit_id" else normalize_claim_code
+        return normalizer(value)
+
+
 class SignupRequest(StrictModel):
     login_id: str = Field(pattern=LOGIN_ID_PATTERN)
     name: str = Field(min_length=1, max_length=60)

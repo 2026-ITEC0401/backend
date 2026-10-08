@@ -10,6 +10,7 @@ from typing import Any
 
 from . import retention as alert_retention
 from .config import Settings
+from .device_kits import DynamoKitRepositoryMixin, MemoryKitRepositoryMixin
 from .domain import Alert, Device, EmergencyAddress, Household, User, iso_utc, parse_timestamp
 from .legal_storage import consent_receipt, valid_consent_time
 from .retention import (
@@ -57,7 +58,7 @@ def _plain(value: Any) -> Any:
     return value
 
 
-class MemoryRepository:
+class MemoryRepository(MemoryKitRepositoryMixin):
     def __init__(self):
         self.users: dict[str, User] = {}
         self.users_by_login_id: dict[str, str] = {}
@@ -873,7 +874,7 @@ class MemoryRepository:
         )[:limit]
 
 
-class DynamoRepository:
+class DynamoRepository(DynamoKitRepositoryMixin):
     """DynamoDB implementation using a core single-table plus an alerts table."""
 
     def __init__(self, settings: Settings):

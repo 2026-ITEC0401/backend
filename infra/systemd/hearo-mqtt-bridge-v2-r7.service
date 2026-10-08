@@ -1,0 +1,22 @@
+[Unit]
+Description=Hearo MQTT to FastAPI v2.5.0 production bridge
+After=network-online.target mosquitto.service hearo-api-v2-final.service
+Wants=network-online.target
+
+# Install as hearo-mqtt-bridge-v2-final.service only at approved cutover.
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/opt/hearo-backend-v2-r7
+EnvironmentFile=/etc/hearo/hearo-mqtt-bridge-v2.env
+ExecStart=/opt/hearo-backend-v2-r7/.venv/bin/python -B -E -u -m hearo_backend.mqtt_bridge
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

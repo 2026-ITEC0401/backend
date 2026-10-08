@@ -1,4 +1,5 @@
 import asyncio
+import copy
 import hmac
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -31,6 +32,7 @@ from .consent import (
     record_current_consent,
 )
 from .domain import Alert, EmergencyAddress, Household, User, iso_utc, parse_timestamp
+from .device_kits import KitError, claim_kit, get_kit_state, preview_kit
 from .history import SEOUL
 from .integrations import create_mqtt_publisher
 from .juso import JusoClient, JusoError
@@ -48,6 +50,7 @@ from .schemas import (
     InviteCodeRequest,
     JusoDetailSearchRequest,
     JusoRoadSearchRequest,
+    KitClaimRequest,
     LoginRequest,
     LegalConsentRequest,
     PasswordChangeRequest,
@@ -144,7 +147,24 @@ def create_app(
     @app.middleware("http")
     async def request_id_middleware(request: Request, call_next):
         request.state.request_id = f"req-{uuid.uuid4().hex}"
-        response = await call_next(request)
+        kit_path = (
+            "/households/" in request.url.path
+            and "/device-kit" in request.url.path
+        )
+        try:
+            response = await call_next(request)
+        except Exception:
+            if not kit_path:
+                raise
+            # Kit storage/credential failures must not leak SDK exception text,
+            # claim codes or identifiers through server error responses/logs.
+            response = JSONResponse(status_code=503, content=error_body(request, {
+                "code": "KIT_SERVICE_UNAVAILABLE",
+                "message": "키트 등록 상태를 확인하지 못했습니다. 상태 조회 후 다시 시도해 주세요.",
+                "field_errors": {},
+            }))
+        if kit_path:
+            response.headers["Cache-Control"] = "no-store"
         response.headers["X-Request-ID"] = request.state.request_id
         return response
 
@@ -222,6 +242,16 @@ def create_app(
         }
         return JSONResponse(status_code=status_code, content=error_body(request, detail))
 
+    @app.exception_handler(KitError)
+    async def kit_error_handler(request: Request, exc: KitError):
+        return JSONResponse(
+            status_code=exc.status_code,
+            content=error_body(request, {
+                "code": exc.code, "message": str(exc), "field_errors": {},
+            }),
+            headers={"Cache-Control": "no-store"},
+        )
+
     def current_user(
         credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)],
     ) -> User:
@@ -256,6 +286,35 @@ def create_app(
         if user.role != "owner":
             raise _error(403, "OWNER_REQUIRED", "owner 권한이 필요합니다.")
         return user
+
+    def kit_household_user(
+        household_id: str, user: Annotated[User, Depends(current_user)]
+    ) -> User:
+        # MemoryRepository returns live objects; freeze the path-authorized
+        # identity before another thread can unlink/relink it to another home.
+        user = copy.deepcopy(user)
+        if user.household_link_status != "linked" or not user.household_id:
+            raise _error(409, "HOUSEHOLD_LINK_REQUIRED", "가구 연동이 필요합니다.")
+        if user.household_id != household_id:
+            raise _error(403, "HOUSEHOLD_ACCESS_DENIED", "다른 가구에는 접근할 수 없습니다.")
+        household = app.state.repository.get_household_consistent(household_id)
+        if not household or household.status != "active":
+            raise _error(409, "HOUSEHOLD_INACTIVE", "비활성화된 가구입니다.")
+        return user
+
+    def kit_owner_user(
+        user: Annotated[User, Depends(kit_household_user)]
+    ) -> User:
+        if user.role != "owner":
+            raise _error(403, "OWNER_REQUIRED", "owner 권한이 필요합니다.")
+        return user
+
+    def kit_input_limit(request: Request, user: User) -> None:
+        host = request.client.host if request.client else "unknown"
+        if not app.state.limiter.check_many([
+            (f"kit-user:{user.user_id}", 10), (f"kit-ip:{host}", 30),
+        ], 900):
+            raise _error(429, "KIT_CLAIM_RATE_LIMITED", "잠시 뒤 다시 시도해 주세요.")
 
     def realtime_user(user_id: str):
         getter = getattr(
@@ -748,6 +807,39 @@ def create_app(
             )
         except JusoError as exc:
             raise_juso_error(exc)
+
+    @app.get("/households/{household_id}/device-kit")
+    def device_kit_state(
+        household_id: str,
+        user: Annotated[User, Depends(kit_household_user)],
+    ):
+        return get_kit_state(app.state.repository, user, app.state.settings)
+
+    @app.post("/households/{household_id}/device-kit/claim/preview")
+    def preview_device_kit(
+        household_id: str,
+        payload: KitClaimRequest,
+        request: Request,
+        owner: Annotated[User, Depends(kit_owner_user)],
+    ):
+        kit_input_limit(request, owner)
+        return preview_kit(
+            app.state.repository, owner, app.state.settings,
+            payload.kit_id, payload.claim_code,
+        )
+
+    @app.post("/households/{household_id}/device-kit/claim")
+    def claim_device_kit(
+        household_id: str,
+        payload: KitClaimRequest,
+        request: Request,
+        owner: Annotated[User, Depends(kit_owner_user)],
+    ):
+        kit_input_limit(request, owner)
+        return claim_kit(
+            app.state.repository, owner, app.state.settings,
+            payload.kit_id, payload.claim_code,
+        )
 
     @app.get("/households/{household_id}/devices")
     def devices(

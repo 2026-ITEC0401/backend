@@ -1,14 +1,17 @@
-# Hearo 백엔드 v2.4.0
+# Hearo 백엔드 v2.5.0
+
+v2.5.0은 키트 번호·등록 코드 기반 가구 귀속 API 3개를 추가합니다. 기존 데모 가구는 `legacy_registered`로 유지하며, 새 owner 가입은 `unregistered`로 시작합니다. 키트 등록은 물리 보드의 credential·MQTT·Wi-Fi를 자동 변경하지 않습니다. 소스 완료와 운영 배포 완료는 별개입니다.
 
 구현 기준일은 2026-10-07입니다. v2.4.0은 기존 최근 7일 이력·미확인, ESP32 LED·회원 탈퇴 기능을 유지하면서 알림의 90일 만료 처리, 문서 버전별 명시적 동의 API와 신규 가입의 만 14세 이상 자가 확인을 추가합니다. 문서는 아직 공개 전이므로 실제 시행일·버전·URL이 확정되기 전에는 문서 버전 `null` 호환 모드를 사용하지만, 연령 확인은 모든 신규 가입에 필수입니다. 이 저장소의 구현 완료가 EC2 배포 완료를 의미하지는 않습니다.
 
 - API 계약과 프론트 필드 활용 사전: [`docs/API_SPEC_V2_DRAFT.md`](./docs/API_SPEC_V2_DRAFT.md) 10절
 - 기존 샘플과의 차이: [`docs/API_SPEC_V2_SAMPLE_GAP.md`](./docs/API_SPEC_V2_SAMPLE_GAP.md)
-- 최신 배포와 롤백: [`docs/DEPLOYMENT_V2_4.md`](./docs/DEPLOYMENT_V2_4.md)
+- 최신 키트 배포: [`docs/DEPLOYMENT_DEVICE_KIT_V2_5.md`](./docs/DEPLOYMENT_DEVICE_KIT_V2_5.md)
+- 이전 v2.4.0 배포와 보관정책: [`docs/DEPLOYMENT_V2_4.md`](./docs/DEPLOYMENT_V2_4.md)
 - 이전 v2.3.0 배포 기록: [`docs/DEPLOYMENT.md`](./docs/DEPLOYMENT.md)
 - v2.4.0 정책·프론트 계약: [`docs/PRIVACY_RETENTION_V2_4.md`](./docs/PRIVACY_RETENTION_V2_4.md)
 - v2.4.0 단계별 배포·마이그레이션 주의사항: [`docs/DEPLOYMENT_V2_4.md`](./docs/DEPLOYMENT_V2_4.md)
-- 키트 등록 설계 초안(미구현·미배포, v2.4.0 미포함): [`docs/DEVICE_KIT_API_SPEC.md`](./docs/DEVICE_KIT_API_SPEC.md)
+- 키트 등록 구현 계약(v2.4.0에서는 미구현, v2.5.0 추가): [`docs/DEVICE_KIT_API_SPEC.md`](./docs/DEVICE_KIT_API_SPEC.md)
 
 ## 구현된 기능
 
@@ -30,6 +33,7 @@
 - 발생 시각부터 90일 TTL, 만료 알림 조회 차단, 백업 포함 미리보기·조건부 정리 도구
 - 공개 문서 조회, 본인 동의 상태·명시적 재동의, 기존 회원의 미확인 버전 null 유지
 - owner·family member 신규 가입의 엄격한 만 14세 이상 자가 확인과 기존 회원의 nullable 연령 확인 이력
+- 키트 조회·미리보기·원자적 등록, 등록 코드 Argon2id 해시, 물리 번호 중복 방지, owner 전용 등록
 
 진동, 민감도, 녹음 재생, 세탁 완료 알림, 이메일/SES 비밀번호 재설정은 최종 범위에 포함하지 않습니다.
 
@@ -90,9 +94,9 @@ python -m uvicorn dashboard_api_v2:app --reload --port 8001
 curl http://127.0.0.1:8001/health
 ```
 
-Swagger UI는 `http://127.0.0.1:8001/docs`에서 확인합니다. 정상 기준은 전체 테스트 통과와 `{"status":"ok","version":"2.4.0"}` 응답입니다.
+Swagger UI는 `http://127.0.0.1:8001/docs`에서 확인합니다. 정상 기준은 전체 테스트 통과와 `{"status":"ok","version":"2.5.0"}` 응답입니다.
 
-GitHub CI와 로컬 테스트는 실제 AWS·EC2·ESP32·Raspberry Pi·프론트 통합 시험을 대신하지 않습니다. 키트 등록 경로는 아직 OpenAPI에 없으며 별도 릴리스로 구현해야 합니다.
+GitHub CI와 로컬 테스트는 실제 AWS·EC2·ESP32·Raspberry Pi·프론트 통합 시험을 대신하지 않습니다. 등록할 키트는 관리자 도구로 먼저 발급해야 하며 문서의 예시 제품 번호·코드는 실제 데이터가 아닙니다.
 
 공개 회원 탈퇴는 연동·미연동 계정의 참조·동의·식별정보와 연결된 가구 변경을 최대 100개 고유 항목의 단일 DynamoDB 트랜잭션으로 처리합니다. 기존 스테이징 소스의 실제 100개 성공·101개 사전 차단·조건 충돌과 일부 페이지 커서는 검증했지만, 원본 Delete의 4MiB 한계·결과 불명 전송 실패 및 이번 연령 확인 변경의 실제 AWS 재검증은 운영 전환 조건으로 남습니다. 자세한 내용은 [저장·탈퇴 무결성](./docs/PRIVACY_RETENTION_V2_4.md#5-저장탈퇴-무결성)을 참고하십시오.
 

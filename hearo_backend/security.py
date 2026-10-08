@@ -137,3 +137,18 @@ class SlidingWindowLimiter:
                 return False
             events.append(now)
             return True
+
+    def check_many(self, rules: list[tuple[str, int]], window_seconds: int) -> bool:
+        """Check and consume shared user/IP quotas in one process-wide lock."""
+        now = time.monotonic()
+        boundary = now - window_seconds
+        with self._lock:
+            for key, _ in rules:
+                events = self._events[key]
+                while events and events[0] < boundary:
+                    events.popleft()
+            if any(len(self._events[key]) >= limit for key, limit in rules):
+                return False
+            for key, _ in rules:
+                self._events[key].append(now)
+            return True

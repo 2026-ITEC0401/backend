@@ -110,6 +110,7 @@ def signup(repository, tokens: TokenManager, settings: Settings, request) -> dic
             invite_hash=invite_hash,
             invite_nonce=invite_nonce,
             invite_expires_at=invite_expires_at,
+            device_kit_status="unregistered",
         )
         devices = []
         for device_id, location, device_type in FIXED_DEVICES:

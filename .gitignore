@@ -26,3 +26,4 @@ config.h
 # 로컬 smoke test 응답에는 토큰·credential이 포함될 수 있음
 *signup-response*.json
 *device-credentials*.json
+*kit-registration-code*.json
